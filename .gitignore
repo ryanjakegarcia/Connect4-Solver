@@ -9,6 +9,7 @@ __pycache__/
 .parallel_move_backfill_test2/
 .opening_book_scores.tsv
 .opening_book_moves.tsv
+.pw-user-data-firefox/
 
 # Build artifacts
 solver
