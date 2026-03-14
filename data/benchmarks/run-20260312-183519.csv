@@ -1,0 +1,2 @@
+timestamp,suite,positions,total_nodes,total_time_us,avg_time_us,avg_nodes,solver_sha,solver_mtime
+20260312-183519,End-Easy,1000,51276,4071,4.1,51.3,757631dcc174,2026-03-12 18:33:46

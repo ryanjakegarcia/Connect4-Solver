@@ -1,0 +1,23 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "UI: connect4.py",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/ui/connect4.py",
+      "cwd": "${workspaceFolder}/ui",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "UI: connect4vsAI.py",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/ui/connect4vsAI.py",
+      "cwd": "${workspaceFolder}/ui",
+      "console": "integratedTerminal",
+      "justMyCode": true
+    }
+  ]
+}

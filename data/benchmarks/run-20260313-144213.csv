@@ -1,0 +1,2 @@
+timestamp,suite,positions,total_nodes,total_time_us,avg_time_us,avg_nodes,solver_sha,solver_mtime
+20260313-144213,suites/Begin-Easy,1000,3191230,238037,238.0,3191.2,504587809682,2026-03-13 14:41:46

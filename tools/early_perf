@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ ! -x ./solver ]; then
+  echo "Error: './solver' not found or not executable."
+  echo "Build it with: g++ -std=c++17 -O2 -o solver src/solver.cpp"
+  exit 1
+fi
+
+if ! command -v timeout >/dev/null 2>&1; then
+  echo "Error: 'timeout' command is required but not found."
+  exit 1
+fi
+
+iters=1
+threshold_sec=5
+timeout_sec=6
+positions=()
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -n|--iters)
+      if [ "$#" -lt 2 ]; then
+        echo "Error: missing value for $1"
+        exit 1
+      fi
+      iters="$2"
+      shift 2
+      ;;
+    -t|--threshold-sec)
+      if [ "$#" -lt 2 ]; then
+        echo "Error: missing value for $1"
+        exit 1
+      fi
+      threshold_sec="$2"
+      shift 2
+      ;;
+    --timeout-sec)
+      if [ "$#" -lt 2 ]; then
+        echo "Error: missing value for $1"
+        exit 1
+      fi
+      timeout_sec="$2"
+      shift 2
+      ;;
+    -h|--help)
+      cat <<'EOF'
+Usage: ./early_perf [options] [position ...]
+
+Measure solve performance for early-game positions. Each solve runs with a
+timeout so long positions cannot stall the report.
+
+Options:
+  -n, --iters N          Repetitions per position (default: 1)
+  -t, --threshold-sec S  Pass/fail threshold in seconds per solve (default: 5)
+      --timeout-sec S    Hard timeout per solve in seconds (default: 6)
+  -h, --help             Show this help text
+
+Examples:
+  ./early_perf
+  ./early_perf --iters 3 4 44 445
+  ./early_perf --iters 5 --threshold-sec 5 --timeout-sec 8 4 44 445
+EOF
+      exit 0
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      positions+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [ "$#" -gt 0 ]; then
+  positions+=("$@")
+fi
+
+if [ "${#positions[@]}" -eq 0 ]; then
+  positions=(4 44 445 4455 44556)
+fi
+
+if ! [[ "$iters" =~ ^[0-9]+$ ]] || [ "$iters" -le 0 ]; then
+  echo "Error: --iters must be a positive integer."
+  exit 1
+fi
+
+if ! [[ "$threshold_sec" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "Error: --threshold-sec must be a non-negative number."
+  exit 1
+fi
+
+if ! [[ "$timeout_sec" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  echo "Error: --timeout-sec must be a non-negative number."
+  exit 1
+fi
+
+solver_sha="$(sha256sum ./solver | awk '{print substr($1,1,12)}')"
+solver_mtime="$(stat -c '%y' ./solver | cut -d'.' -f1)"
+
+tmp_data="$(mktemp)"
+tmp_out="$(mktemp)"
+trap 'rm -f "$tmp_data" "$tmp_out"' EXIT
+
+total_solves=0
+start_ns="$(date +%s%N)"
+
+for p in "${positions[@]}"; do
+  for ((i=1; i<=iters; i++)); do
+    if timeout "${timeout_sec}s" ./solver <<< "$p" > "$tmp_out" 2>/dev/null; then
+      # Expected format: <position> <score> <nodes> <time_us>
+      if awk 'NF>=4' "$tmp_out" >/dev/null 2>&1; then
+        nodes="$(awk 'NR==1 {print $3}' "$tmp_out")"
+        us="$(awk 'NR==1 {print $4}' "$tmp_out")"
+        printf "%s %s %s ok\n" "$p" "$nodes" "$us" >> "$tmp_data"
+      else
+        printf "%s 0 0 parse_error\n" "$p" >> "$tmp_data"
+      fi
+    else
+      code=$?
+      if [ "$code" -eq 124 ]; then
+        printf "%s 0 0 timeout\n" "$p" >> "$tmp_data"
+      else
+        printf "%s 0 0 error\n" "$p" >> "$tmp_data"
+      fi
+    fi
+    total_solves=$((total_solves + 1))
+  done
+done
+
+end_ns="$(date +%s%N)"
+
+echo "Early Position Performance"
+echo "Solver: ./solver (sha256:${solver_sha}, mtime:${solver_mtime})"
+echo "Iterations/position: ${iters}"
+echo "Threshold: ${threshold_sec}s"
+echo "Timeout per solve: ${timeout_sec}s"
+echo
+
+printf "%-10s %8s %10s %12s %12s %12s %10s\n" "position" "count" "timeouts" "avg_us" "max_us" "avg_nodes" "status"
+
+awk -v threshold_sec="$threshold_sec" '
+BEGIN {
+  threshold_us = threshold_sec * 1000000.0;
+}
+{
+  pos = $1;
+  nodes = $2 + 0;
+  us = $3 + 0;
+  state = $4;
+
+  if (!(pos in seen)) {
+    seen[pos] = 1;
+    order[++n] = pos;
+  }
+
+  count[pos]++;
+  if (state == "timeout") {
+    timeouts[pos]++;
+    next;
+  }
+  if (state != "ok") {
+    errors[pos]++;
+    next;
+  }
+
+  ok[pos]++;
+  total_us[pos] += us;
+  total_nodes[pos] += nodes;
+  if (us > max_us[pos]) max_us[pos] = us;
+}
+END {
+  for (i = 1; i <= n; i++) {
+    p = order[i];
+    c = count[p] + 0;
+    t = timeouts[p] + 0;
+    o = ok[p] + 0;
+    e = errors[p] + 0;
+
+    avg_us = (o > 0) ? (total_us[p] / o) : 0;
+    avg_nodes = (o > 0) ? (total_nodes[p] / o) : 0;
+    mx = (o > 0) ? max_us[p] : 0;
+
+    if (t > 0) status = "FAIL";
+    else if (e > 0) status = "ERROR";
+    else if (mx <= threshold_us) status = "PASS";
+    else status = "FAIL";
+
+    printf "%-10s %8d %10d %12.1f %12d %12.1f %10s\n", p, c, t, avg_us, mx, avg_nodes, status;
+  }
+}
+' "$tmp_data"
+
+wall_ns=$((end_ns - start_ns))
+wall_s=$(awk -v ns="$wall_ns" 'BEGIN { printf "%.6f", ns / 1000000000.0 }')
+throughput=$(awk -v lines="$total_solves" -v ns="$wall_ns" 'BEGIN { if (ns == 0) print 0; else printf "%.2f", lines / (ns / 1000000000.0) }')
+
+echo
+echo "Total solves attempted: ${total_solves}"
+echo "Wall time: ${wall_s}s"
+echo "Throughput: ${throughput} solves/s"

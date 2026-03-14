@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [ ! -x ./solver ]; then
+  echo "Error: './solver' not found or not executable."
+  echo "Build it with: g++ -std=c++17 -O2 -o solver src/solver.cpp"
+  exit 1
+fi
+
+if [ ! -x ./test ]; then
+  echo "Error: './test' not found or not executable."
+  exit 1
+fi
+
+BENCH_DIR="data/benchmarks"
+mkdir -p "$BENCH_DIR"
+
+TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+OUT_CSV="$BENCH_DIR/run-${TIMESTAMP}.csv"
+TMP_OUT="$(mktemp)"
+
+# Default suites (override by passing benchmark files as args).
+if [ "$#" -gt 0 ]; then
+  SUITES=("$@")
+else
+  SUITES=(
+    suites/Begin-Easy
+    suites/Begin-Medium
+    suites/Begin-Hard
+    suites/Middle-Easy
+    suites/Middle-Medium
+    suites/End-Easy
+  )
+fi
+
+# Verify suite files exist.
+for suite in "${SUITES[@]}"; do
+  if [ ! -f "$suite" ]; then
+    echo "Error: benchmark file '$suite' not found."
+    rm -f "$TMP_OUT"
+    exit 1
+  fi
+done
+
+# CSV header
+printf "timestamp,suite,positions,total_nodes,total_time_us,avg_time_us,avg_nodes,solver_sha,solver_mtime\n" > "$OUT_CSV"
+
+echo "Running benchmarks..."
+for suite in "${SUITES[@]}"; do
+  ./test "$suite" > "$TMP_OUT"
+
+  positions="$(awk -F': *' '/^Positions:/ {print $2}' "$TMP_OUT")"
+  total_nodes="$(awk -F': *' '/^Total nodes:/ {print $2}' "$TMP_OUT")"
+  total_time="$(awk -F': *' '/^Total time:/ {split($2,a," "); print a[1]}' "$TMP_OUT")"
+  avg_time="$(awk -F': *' '/^Avg time\/pos:/ {split($2,a," "); print a[1]}' "$TMP_OUT")"
+  avg_nodes="$(awk -F': *' '/^Avg nodes\/pos:/ {print $2}' "$TMP_OUT")"
+  solver_sha="$(sed -n 's/^Solver: .*sha256:\([^,]*\), mtime:.*$/\1/p' "$TMP_OUT")"
+  solver_mtime="$(sed -n 's/^Solver: .*mtime:\(.*\))$/\1/p' "$TMP_OUT")"
+
+  printf "%s,%s,%s,%s,%s,%s,%s,%s,%s\n" \
+    "$TIMESTAMP" "$suite" "$positions" "$total_nodes" "$total_time" "$avg_time" "$avg_nodes" "$solver_sha" "$solver_mtime" \
+    >> "$OUT_CSV"
+
+  printf "  %-13s nodes=%s time_us=%s\n" "$suite" "$total_nodes" "$total_time"
+done
+
+rm -f "$TMP_OUT"
+
+echo "Saved: $OUT_CSV"
+
+# Compare with previous run if available.
+PREV_CSV="$(ls -1t "$BENCH_DIR"/run-*.csv 2>/dev/null | grep -Fv "$OUT_CSV" | head -n 1 || true)"
+if [ -z "$PREV_CSV" ]; then
+  echo "No prior baseline found yet. Run again to get automatic comparisons."
+  exit 0
+fi
+
+echo
+echo "Comparing against: $PREV_CSV"
+awk -F',' '
+NR==FNR && FNR>1 {
+  prev_nodes[$2]=$4;
+  prev_time[$2]=$5;
+  next;
+}
+FNR>1 {
+  suite=$2;
+  nodes=$4+0;
+  time=$5+0;
+  pn=prev_nodes[suite]+0;
+  pt=prev_time[suite]+0;
+
+  if (pn==0 || pt==0) {
+    printf "  %-13s no previous data\n", suite;
+    next;
+  }
+
+  nd = nodes - pn;
+  td = time - pt;
+  np = (pn == 0 ? 0 : (100.0 * nd / pn));
+  tp = (pt == 0 ? 0 : (100.0 * td / pt));
+
+  printf "  %-13s nodes %+d (%+.2f%%)   time_us %+d (%+.2f%%)\n", suite, nd, np, td, tp;
+}
+' "$PREV_CSV" "$OUT_CSV"

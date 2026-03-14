@@ -1,0 +1,15 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": [
+    "ui",
+    "src",
+    "tools"
+  ],
+  "executionEnvironments": [
+    {
+      "root": "ui",
+      "venv": ".venv"
+    }
+  ]
+}

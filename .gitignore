@@ -1,0 +1,22 @@
+# Python environment and caches
+.venv/
+__pycache__/
+*.pyc
+
+# Tooling/runtime caches
+.parallel_move_backfill/
+.parallel_move_backfill_test/
+.parallel_move_backfill_test2/
+.opening_book_scores.tsv
+.opening_book_moves.tsv
+
+# Build artifacts
+solver
+solver_check
+test
+backfill_opening_book
+backfill_opening_book_scores
+backfill_opening_book_moves
+
+# OS/editor noise
+.DS_Store
