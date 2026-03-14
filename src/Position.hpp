@@ -7,15 +7,56 @@
 /**
  * A class storing a Connect 4 position.
  * Functions are relative to current player to play.
- * Position containing alignment are not supported by this class.
+ * Positions containing alignments are not supported by this class.
  */
 
  /**
   * Generate a bitmask containing one for the bottom slot of each column
-  * must be defined outside of the class definition to be available at compule time for bottom_mask
+  * must be defined outside of the class definition to be available at compile time for bottom_mask
+  * 
+  * Bitboard to encode for representation
+  * .  .  .  .  .  .  .
+  * 5 12 19 26 33 40 47
+  * 4 11 18 25 32 39 46
+  * 3 10 17 24 31 38 45
+  * 2  9 16 23 30 37 44
+  * 1  8 15 22 29 36 43
+  * 0  7 14 21 28 35 42
+  * 
+  * Position is stored as
+ * - a bitboard "mask" with 1 on any color stones
+ * - a bitboard "current_player" with 1 on stones of current player
+ *
+ * "current_player" bitboard can be transformed into a compact and non ambiguous key
+ * by adding an extra bit on top of the last non empty cell of each column.
+ * This allow to identify all the empty cells whithout needing "mask" bitboard
+ *
+ * current_player "x" = 1, opponent "o" = 0
+ * board     position  mask      key       bottom
+ *           0000000   0000000   0000000   0000000
+ * .......   0000000   0000000   0001000   0000000
+ * ...o...   0000000   0001000   0010000   0000000
+ * ..xx...   0011000   0011000   0011000   0000000
+ * ..ox...   0001000   0011000   0001100   0000000
+ * ..oox..   0000100   0011100   0000110   0000000
+ * ..oxxo.   0001100   0011110   1101101   1111111
+ *
+ * current_player "o" = 1, opponent "x" = 0
+ * board     position  mask      key       bottom
+ *           0000000   0000000   0001000   0000000
+ * ...x...   0000000   0001000   0000000   0000000
+ * ...o...   0001000   0001000   0011000   0000000
+ * ..xx...   0000000   0011000   0000000   0000000
+ * ..ox...   0010000   0011000   0010100   0000000
+ * ..oox..   0011000   0011100   0011010   0000000
+ * ..oxxo.   0010010   0011110   1110011   1111111
+ *
+ * key is an unique representation of a board key = position + mask + bottom
+ * in practice, as bottom is constant, key = position + mask is also a
+ * non-ambigous representation of the position.
   */
 constexpr static uint64_t bottom(int width, int height){
-  return width == 0 ? 0 : bottom(width - 1, height) | 1LL << (width - 1) * (height + 1);
+  return width == 0 ? 0 : bottom(width - 1, height) | 1LL << (width - 1) * (height + 1); //fills 0, 7, 14, 21, 28, 35, 42 with 1s
 }
 
 class Position{
@@ -62,7 +103,7 @@ public:
   /**
    * Indicates whether the current player wins by playing a given column.
    * This function should never be called on a non-playable column.
-   * @param col: 0-base index of a playable column.
+   * @param col: 0-based index of a playable column.
    * @return true if current player makes an alignment by playing the corresponding column col.
    */
   bool canWinNext() const

@@ -17,6 +17,7 @@ TranspositionTable<Position::WIDTH * (Position::HEIGHT + 1),
 
 struct OpeningBook {
     std::unordered_map<uint64_t, int> exactScoreByCanonicalKey;
+    std::unordered_map<uint64_t, int> weakScoreByCanonicalKey;
     std::unordered_map<uint64_t, int> bestMoveByKey;
     bool loaded = false;
 };
@@ -31,6 +32,10 @@ static int mirrorCol(int col) {
 static void addBookBestMove(const Position &P, int best_col) {
     g_openingBook.bestMoveByKey[P.key()] = best_col;
     g_openingBook.bestMoveByKey[P.mirroredKey()] = mirrorCol(best_col);
+}
+
+static int classifyWeakScore(int score) {
+    return (score > 0) - (score < 0);
 }
 
 static bool loadOpeningBook(const char *path) {
@@ -71,6 +76,7 @@ static bool loadOpeningBook(const char *path) {
                     if(score_tok != "-") {
                         int score = std::stoi(score_tok);
                         g_openingBook.exactScoreByCanonicalKey[P.canonicalKey()] = score;
+                        g_openingBook.weakScoreByCanonicalKey[P.canonicalKey()] = classifyWeakScore(score);
                         loaded_scores++;
                     }
                 } catch(const std::exception &) {
@@ -97,6 +103,13 @@ static bool getOpeningBookBestMove(const Position &P, int &best_col) {
 static bool getOpeningBookExactScore(const Position &P, int &score) {
     const auto it = g_openingBook.exactScoreByCanonicalKey.find(P.canonicalKey());
     if(it == g_openingBook.exactScoreByCanonicalKey.end()) return false;
+    score = it->second;
+    return true;
+}
+
+static bool getOpeningBookWeakScore(const Position &P, int &score) {
+    const auto it = g_openingBook.weakScoreByCanonicalKey.find(P.canonicalKey());
+    if(it == g_openingBook.weakScoreByCanonicalKey.end()) return false;
     score = it->second;
     return true;
 }
@@ -309,11 +322,13 @@ int main(int argc, char** argv){
             solver.resetNodeCount();
             unsigned long long start_time = getTimeMicrosec();
             int score;
-            if(!weak && getOpeningBookExactScore(P, score)) {
-                // Exact score hit from opening book.
+            if(weak) {
+                if(!getOpeningBookWeakScore(P, score))
+                    score = solver.solve(P, true);
             }
             else {
-                score = solver.solve(P, weak);
+                if(!getOpeningBookExactScore(P, score))
+                    score = solver.solve(P, false);
             }
             unsigned long long end_time = getTimeMicrosec();
             std::cout << line << " " << score << " " << solver.getNodeCount() << " " << (end_time - start_time);

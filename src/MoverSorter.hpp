@@ -20,7 +20,7 @@ public:
     /**
      * Get next move
      * @return next remaining move with max score and remove it from the container.
-     * If no more move is available return 0
+     * If no more moves are available return 0
      */
     uint64_t getNext()
     {
@@ -31,7 +31,7 @@ public:
     }
 
     /**
-     * reset (empty) the container
+     * Set size = 0, allows old data to be overwritten. ("empties container")
      */
     void reset()
     {
