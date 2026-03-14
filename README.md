@@ -72,6 +72,9 @@ Modes:
 Key options:
 - `--player 1|2|auto`: choose your side (or prompt at runtime with `auto`)
 - `--weak`: use weak solver mode (`./solver -w`)
+- `--auto-rematch`: in auto mode, click Rematch after terminal state when available (default behavior is leave room)
+- `--post-game-wait-sec N`: in auto papergames mode, wait `N` seconds on terminal page before leave/rematch actions (default `5`)
+- `--post-game-reload-sec N`: in auto papergames mode, reload lobby if post-game controls do not appear within `N` seconds (`0` disables, default)
 - `--manual-fallback --manual-input-mode incremental|full`: fallback input when board parsing fails
 - `--block-ads --block-level conservative|aggressive`: optional request blocking
 - `--config ui/browser_targets.papergames.json`: custom board selector config
@@ -79,8 +82,31 @@ Key options:
 Current papergames behavior:
 - Uses papergames-specific parsing with grid column-count deltas (`source=grid-delta`) to track moves robustly.
 - Uses solver status endpoint (`sequence!`) to validate snapshots and detect `win1|win2|draw|invalid`.
-- Resets internal tracking after terminal positions and waits for a fresh empty board before attaching to the next game.
+- In auto mode, after terminal state it waits `--post-game-wait-sec` (default `5s`) before leave/rematch actions.
+- If post-game controls are delayed or missing, auto mode can optionally fall back to reloading `https://papergames.io/en/connect4` after the configured timeout and resumes matchmaking.
+- If opponent leaves/disconnects, auto mode leaves room and starts new matchmaking.
+- After leaving room in auto mode, it clicks `Play online` with random player and continues.
+- If the lobby remains idle after a queue click, auto mode retries queue controls automatically.
+- If a game abort/disconnect causes sequence loss, auto mode recovers via terminal/post-game/lobby detection and resumes lifecycle flow.
 - Suppresses duplicate suggestion spam and prints opponent move lines when detected.
+- Records slow exact solves (`>10s`) to `data/slow_solve_prefixes.log` (one entry per sequence per run) for targeted opening-book expansion.
+
+Recommended auto-mode command:
+
+```bash
+.venv/bin/python ui/browser_bridge.py \
+  --site-mode papergames \
+  --browser firefox \
+  --persistent-profile \
+  --user-data-dir .pw-user-data-firefox \
+  --url https://papergames.io/en/connect4 \
+  --mode auto \
+  --player auto \
+  --weak \
+  --poll-ms 250 \
+  --post-game-wait-sec 5 \
+  --post-game-reload-sec 0
+```
 
 Chromium extension mode (optional):
 
@@ -174,6 +200,8 @@ make venv
 make ui-deps
 make ui-connect4
 make ui-vsai
+make bridge-observe
+make bridge-auto
 make book-status
 make clean
 ```
