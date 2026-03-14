@@ -16,6 +16,7 @@ ROW_COUNT = 6
 COLUMN_COUNT = 7
 
 AUTO = 1
+STARTUP = 1
 TURN_DELAY = 500
 GAME_DELAY = 1000
 DROP_SPEED = 30
@@ -241,6 +242,50 @@ def toggle_auto_mode():
     print(display_text)
     AUTO = 1 - AUTO
 
+def toggle_startup_mode():
+    global STARTUP
+
+    display_text = "Startup select: " + ("ON" if STARTUP == 0 else "OFF")
+    label = game_font.render(display_text, 1, BLUE)
+    screen.blit(label, (40,10))
+    print(display_text)
+    STARTUP = 1 - STARTUP
+
+def get_starting_turn(default_turn, current_board):
+    if STARTUP == 0:
+        return default_turn
+
+    # Block game start until the player explicitly chooses who moves first.
+    waiting_for_choice = True
+    while waiting_for_choice:
+        pygame.draw.rect(screen, BLACK, (0, 0, width, SQUARESIZE))
+        prompt = prompt_font.render("Press 1 (You) or 2 (AI) to start", 1, BLUE)
+        screen.blit(prompt, (20, 25))
+        pygame.display.update()
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                sys.exit()
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    sys.exit()
+                if event.key in (pygame.K_1, pygame.K_KP1):
+                    draw_board(current_board)
+                    return PLAYER
+                if event.key in (pygame.K_2, pygame.K_KP2):
+                    draw_board(current_board)
+                    return AI
+                if event.key == pygame.K_SPACE:
+                    toggle_auto_mode()
+                if event.key == pygame.K_s:
+                    toggle_startup_mode()
+                    if STARTUP == 0:
+                        draw_board(current_board)
+                        return default_turn
+                update_delays(event.key)
+
+        pygame.time.wait(10)
+
 def update_delays(key):
     global TURN_DELAY, GAME_DELAY
 
@@ -261,7 +306,7 @@ def reset_round():
     new_board = create_board()
     pygame.draw.rect(screen, BLACK, (0, 0, width, height))
     draw_board(new_board)
-    return new_board, False, "", random.randint(PLAYER, AI)
+    return new_board, False, "", get_starting_turn(random.randint(PLAYER, AI), new_board)
 
 #region Initialize game
 board = create_board()
@@ -283,26 +328,24 @@ screen = pygame.display.set_mode(size)
 draw_board(board)
 pygame.display.update()
 
-turn = AI
-
 game_font = pygame.font.SysFont("monospace", 75)
+prompt_font = pygame.font.SysFont("monospace", 36)
 #endregion
 
-turn = 0
+turn = get_starting_turn(AI, board)
 
 #Game loop
 while not game_over:
+    # Keep the top bar in sync even when no new input events arrive.
+    posx = pygame.mouse.get_pos()[0]
+    pygame.draw.rect(screen, BLACK, (0, 0, width, SQUARESIZE))
+    if turn == PLAYER:
+        pygame.draw.circle(screen, RED, (posx, int(SQUARESIZE/2)), RADIUS)
+    pygame.display.update()
+
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             sys.exit()
-
-        if event.type == pygame.MOUSEMOTION:
-            pygame.draw.rect(screen, BLACK, (0, 0, width, SQUARESIZE))
-            posx = event.pos[0]
-            if turn == PLAYER:
-                pygame.draw.circle(screen, RED, (posx, int(SQUARESIZE/2)), RADIUS)
-
-        pygame.display.update()
 
         if event.type == pygame.MOUSEBUTTONDOWN:
             pygame.draw.rect(screen, BLACK, (0, 0, width, SQUARESIZE))
@@ -340,6 +383,8 @@ while not game_over:
                 sys.exit()
             if event.key == pygame.K_SPACE:
                 toggle_auto_mode()
+            if event.key == pygame.K_s:
+                toggle_startup_mode()
             update_delays(event.key)
 
 

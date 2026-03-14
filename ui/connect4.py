@@ -19,8 +19,8 @@ ROW_COUNT = 6
 COLUMN_COUNT = 7
 WINDOW_LENGTH = 4
 
-AUTO = 1
-TURN_DELAY = 500
+AUTO = 0
+TURN_DELAY = 0
 GAME_DELAY = 1000
 DROP_SPEED = 30
 
@@ -36,7 +36,7 @@ class Strategy(Enum):
 
 
 P1_STRATEGY = Strategy.SOLVER
-P2_STRATEGY = Strategy.SOLVER
+P2_STRATEGY = Strategy.RANDOM
 MINIMAX_DEPTH = 3
 
 SCORE_4 = 5000
@@ -521,7 +521,7 @@ while True:
 
             win_line = winning_move(board, turn)
             if win_line:
-                winner_text = "Player 1 wins!!" if turn == P1 else "Player 2 wins!!"
+                winner_text = "Red Wins!!" if turn == P1 else "Yellow wins!!"
                 winner_color = RED if turn == P1 else YELLOW
                 draw_board(board)
                 pygame.draw.line(screen, BLACK, win_line[0], win_line[1], 5)
