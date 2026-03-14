@@ -1,0 +1,10 @@
+{
+  "board_selectors": [
+    "canvas",
+    "[class*='board']",
+    "[id*='board']",
+    "[class*='connect']",
+    "[id*='connect']",
+    "[class*='game'] canvas"
+  ]
+}

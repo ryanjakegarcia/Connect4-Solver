@@ -1,5 +1,6 @@
 #include <cassert>
 #include <climits>
+#include <array>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -240,6 +241,86 @@ unsigned long long getTimeMicrosec(){
 // Center-out column evaluation order (0-based)
 static const int COL_ORDER[Position::WIDTH] = {3, 2, 4, 1, 5, 0, 6};
 
+enum class GameStatus {
+    Ongoing,
+    WinP1,
+    WinP2,
+    Draw,
+    Invalid,
+};
+
+static bool isConnect4(
+    const std::array<std::array<int, Position::WIDTH>, Position::HEIGHT> &grid,
+    int row,
+    int col,
+    int player
+) {
+    static const int DIRS[4][2] = {
+        {1, 0}, {0, 1}, {1, 1}, {1, -1}
+    };
+
+    for(const auto &d : DIRS) {
+        int count = 1;
+        for(int sign : {-1, 1}) {
+            int r = row + sign * d[1];
+            int c = col + sign * d[0];
+            while(r >= 0 && r < Position::HEIGHT && c >= 0 && c < Position::WIDTH && grid[r][c] == player) {
+                count++;
+                r += sign * d[1];
+                c += sign * d[0];
+            }
+        }
+        if(count >= 4) return true;
+    }
+    return false;
+}
+
+static GameStatus analyzeSequenceStatus(const std::string &seq) {
+    std::array<std::array<int, Position::WIDTH>, Position::HEIGHT> grid{};
+    std::array<int, Position::WIDTH> heights{};
+
+    int player = 1;
+    bool game_over = false;
+    GameStatus terminal_status = GameStatus::Ongoing;
+    int total = 0;
+
+    for(char ch : seq) {
+        if(ch < '1' || ch > '7') return GameStatus::Invalid;
+        const int col = ch - '1';
+        if(game_over) return GameStatus::Invalid;
+        if(heights[col] >= Position::HEIGHT) return GameStatus::Invalid;
+
+        const int row = heights[col]++;
+        grid[row][col] = player;
+        total++;
+
+        if(isConnect4(grid, row, col, player)) {
+            game_over = true;
+            terminal_status = player == 1 ? GameStatus::WinP1 : GameStatus::WinP2;
+        }
+
+        if(total == Position::WIDTH * Position::HEIGHT) {
+            game_over = true;
+            if(terminal_status == GameStatus::Ongoing)
+                terminal_status = GameStatus::Draw;
+        }
+
+        player = 3 - player;
+    }
+    return game_over ? terminal_status : GameStatus::Ongoing;
+}
+
+static const char *statusToString(GameStatus s) {
+    switch(s) {
+        case GameStatus::Ongoing: return "ongoing";
+        case GameStatus::WinP1: return "win1";
+        case GameStatus::WinP2: return "win2";
+        case GameStatus::Draw: return "draw";
+        case GameStatus::Invalid: return "invalid";
+    }
+    return "invalid";
+}
+
 int main(int argc, char** argv){
     Solver solver;
     bool weak = false;
@@ -255,6 +336,16 @@ int main(int argc, char** argv){
         // Return the 1-based column number of the best move to play.
         bool find_best_move = !line.empty() && line.back() == '?';
         if(find_best_move) line.pop_back();
+
+        // A line ending with '!' is a status query.
+        // Return one of: ongoing, win1, win2, draw, invalid.
+        bool query_status = !find_best_move && !line.empty() && line.back() == '!';
+        if(query_status) line.pop_back();
+
+        if(query_status) {
+            std::cout << statusToString(analyzeSequenceStatus(line)) << std::endl;
+            continue;
+        }
 
         Position P;
         if(P.play(line) != line.size()){

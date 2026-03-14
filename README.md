@@ -38,6 +38,66 @@ make ui-connect4
 make ui-vsai
 ```
 
+## Browser Bridge (Experimental)
+
+The bridge (`ui/browser_bridge.py`) connects the local solver to a live browser game.
+
+Install dependencies once:
+
+```bash
+make ui-deps
+make playwright-install
+```
+
+Recommended observe-mode command (papergames + persistent Firefox profile):
+
+```bash
+.venv/bin/python ui/browser_bridge.py \
+  --site-mode papergames \
+  --browser firefox \
+  --persistent-profile \
+  --user-data-dir .pw-user-data-firefox \
+  --url https://papergames.io/en/connect4 \
+  --mode observe \
+  --player auto \
+  --window-width 1920 \
+  --window-height 1200
+```
+
+Modes:
+- `--mode observe`: print sequence + suggested move only (no clicks)
+- `--mode assist`: ask before clicking
+- `--mode auto`: click automatically
+
+Key options:
+- `--player 1|2|auto`: choose your side (or prompt at runtime with `auto`)
+- `--weak`: use weak solver mode (`./solver -w`)
+- `--manual-fallback --manual-input-mode incremental|full`: fallback input when board parsing fails
+- `--block-ads --block-level conservative|aggressive`: optional request blocking
+- `--config ui/browser_targets.papergames.json`: custom board selector config
+
+Current papergames behavior:
+- Uses papergames-specific parsing with grid column-count deltas (`source=grid-delta`) to track moves robustly.
+- Uses solver status endpoint (`sequence!`) to validate snapshots and detect `win1|win2|draw|invalid`.
+- Resets internal tracking after terminal positions and waits for a fresh empty board before attaching to the next game.
+- Suppresses duplicate suggestion spam and prints opponent move lines when detected.
+
+Chromium extension mode (optional):
+
+```bash
+.venv/bin/python ui/browser_bridge.py \
+  --browser chromium \
+  --extension-dir /absolute/path/to/unpacked/extension \
+  --user-data-dir .pw-user-data \
+  --url https://papergames.io/en/connect4 \
+  --mode assist
+```
+
+Extension notes:
+- Extension mode is Chromium-only.
+- `--extension-dir` requires headed mode.
+- `--user-data-dir` persists extension/profile state.
+
 ## Build and Run (CLI)
 
 Build solver:
@@ -50,6 +110,13 @@ Query best move (input ends with `?`):
 
 ```bash
 printf '16721?\n' | ./solver
+```
+
+Query sequence status (input ends with `!`):
+
+```bash
+printf '1212121!\n' | ./solver
+# -> win1 (possible: ongoing, win1, win2, draw, invalid)
 ```
 
 Query exact score mode:
