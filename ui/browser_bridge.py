@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 import argparse
+from contextlib import nullcontext
 import json
 import os
+import queue
 import re
+import select
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -13,6 +17,34 @@ from urllib.parse import urlparse
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
+
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.patch_stdout import patch_stdout
+except Exception:
+    PromptSession = None
+
+    def patch_stdout(*args, **kwargs):
+        return nullcontext()
+
+from bridge.actions import play_column, click_leave_room, click_rematch, try_click_queue_controls
+from bridge.opponent import read_opponent_username_strict, sanitize_username, usernames_equivalent
+from bridge.parsing import (
+    is_our_turn,
+    in_lobby_url,
+    read_grid_column_counts,
+    infer_single_move_from_count_delta,
+    has_same_column_counts,
+    read_sequence,
+    probe_sequence,
+    is_replay_page,
+    has_in_game_ui,
+    has_initial_your_turn_text,
+    detect_terminal_page_reason,
+    read_post_game_ui_state,
+)
+from bridge.state import RuntimeResetState
+from bridge.stats import BridgeStats, result_from_seq_status, result_from_terminal_reason
 
 VALID_SEQ_RE = re.compile(r"^[1-7]*$")
 BRIDGE_JS = r"""
@@ -506,19 +538,26 @@ SLOW_SOLVE_LOG_PATH = "data/slow_solve_prefixes.log"
 # If post-game controls do not appear in time, reload to lobby and requeue.
 # Set to 0 to disable fallback; users can opt in via CLI.
 POST_GAME_RELOAD_TIMEOUT_SEC = 0.0
-# If lobby remains idle this long after a queue click, retry queueing.
-QUEUE_RETRY_IDLE_SEC = 8.0
+# If lobby/live-room URL remains idle this long after a confirmed queue click,
+# retry queueing. Papergames matchmaking can take up to ~30s.
+QUEUE_RETRY_IDLE_SEC = 30.0
+# After a queue click, allow URL-gating bypass only when strong in-game
+# signals are present for at least this long.
+QUEUE_ATTACH_SIGNAL_GRACE_SEC = 1.5
 # Minimum gap between queue click attempts.
 QUEUE_CLICK_RETRY_GAP_SEC = 1.5
 # Minimum gap between post-game leave/rematch click attempts.
 POST_GAME_ACTION_RETRY_GAP_SEC = 0.6
 # Delay before attempting post-game leave/rematch actions.
 POST_GAME_ACTION_DELAY_SEC = 5.0
+STATS_JSON_PATH = "data/bridge_stats.json"
+STATS_CSV_PATH = "data/bridge_match_history.csv"
 
 
 @dataclass
 class TargetConfig:
     board_selectors: list[str]
+
 
 
 def load_target_config(target: str, config_path: Optional[str]) -> TargetConfig:
@@ -711,6 +750,40 @@ def parse_args() -> argparse.Namespace:
         default=POST_GAME_ACTION_DELAY_SEC,
         help="In auto papergames mode, wait this many seconds on terminal page before leave/rematch actions",
     )
+    parser.add_argument(
+        "--auto-max-runtime-sec",
+        type=float,
+        default=0.0,
+        help=(
+            "In auto mode, maximum runtime before requesting drain; after current game "
+            "resolves, bridge exits gracefully (0 disables)"
+        ),
+    )
+    parser.add_argument(
+        "--stats-json",
+        default=STATS_JSON_PATH,
+        help="Path to persistent bridge stats JSON summary",
+    )
+    parser.add_argument(
+        "--stats-csv",
+        default=STATS_CSV_PATH,
+        help="Path to bridge match history CSV",
+    )
+    parser.add_argument(
+        "--stats-reset",
+        action="store_true",
+        help="Reset persistent bridge stats files at startup",
+    )
+    parser.add_argument(
+        "--our-username",
+        default=None,
+        help="Your papergames username to exclude from opponent capture",
+    )
+    parser.add_argument(
+        "--debug-parse",
+        action="store_true",
+        help="Emit extra parser diagnostics on anomaly/recovery paths",
+    )
     return parser.parse_args()
 
 
@@ -768,12 +841,6 @@ def install_request_blocking(page, first_party_host: str, block_level: str) -> N
     page.route("**/*", handler)
 
 
-def is_our_turn(move_sequence: str, player: int) -> bool:
-    if player == 1:
-        return len(move_sequence) % 2 == 0
-    return len(move_sequence) % 2 == 1
-
-
 def detect_player_from_sequence(move_sequence: str) -> int:
     while True:
         ans = input(
@@ -792,191 +859,46 @@ def detect_player_from_sequence(move_sequence: str) -> int:
         print("[bridge] Please respond with 1, 2, y, or n")
 
 
-def normalize_url_for_compare(url: str) -> str:
-    parsed = urlparse(url)
-    path = parsed.path.rstrip("/")
-    return f"{parsed.scheme}://{parsed.netloc}{path}"
+def is_papergames_live_room_url(current_url: str) -> bool:
+    """Detect papergames live-room routes robustly.
 
-
-def in_lobby_url(current_url: str, game_url: str) -> bool:
-    return normalize_url_for_compare(current_url) == normalize_url_for_compare(game_url)
-
-
-def read_grid_column_counts(page) -> Optional[list[int]]:
-    try:
-        raw = page.evaluate("() => window.__c4Bridge.readGridColumnCounts()")
-    except PlaywrightError:
-        return None
-
-    if not isinstance(raw, list) or len(raw) != 7:
-        return None
-
-    if not all(isinstance(x, int) and 0 <= x <= 6 for x in raw):
-        return None
-
-    return raw
-
-
-def infer_single_move_from_count_delta(prev_seq: str, candidate_seq: str) -> Optional[str]:
-    """Infer one newly added move from per-column count deltas.
-
-    Useful when board reconstruction returns a non-prefix sequence that still
-    represents the same board plus one committed move.
+    Accepts locale variants (`en`, `en-us`), room codes with `_`/`-`, optional
+    trailing path segments, and hash-routed paths.
     """
-    if not VALID_SEQ_RE.fullmatch(prev_seq) or not VALID_SEQ_RE.fullmatch(candidate_seq):
-        return None
-
-    prev_counts = [0] * 7
-    cand_counts = [0] * 7
-    for ch in prev_seq:
-        prev_counts[ord(ch) - ord("1")] += 1
-    for ch in candidate_seq:
-        cand_counts[ord(ch) - ord("1")] += 1
-
-    deltas = [cand_counts[i] - prev_counts[i] for i in range(7)]
-    if any(d < 0 for d in deltas):
-        return None
-
-    total_added = sum(deltas)
-    if total_added != 1:
-        return None
-
-    added_col = deltas.index(1)
-    return str(added_col + 1)
-
-
-def has_same_column_counts(seq_a: str, seq_b: str) -> bool:
-    if not VALID_SEQ_RE.fullmatch(seq_a) or not VALID_SEQ_RE.fullmatch(seq_b):
-        return False
-    if len(seq_a) != len(seq_b):
-        return False
-
-    counts_a = [0] * 7
-    counts_b = [0] * 7
-    for ch in seq_a:
-        counts_a[ord(ch) - ord("1")] += 1
-    for ch in seq_b:
-        counts_b[ord(ch) - ord("1")] += 1
-    return counts_a == counts_b
-
-
-def read_sequence(
-    page,
-    manual_fallback: bool,
-    game_url: str,
-    manual_mode: str,
-    manual_sequence: Optional[str],
-    detected_player: Optional[int],
-    initial_storage_sequence: Optional[str],
-) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    detected = page.evaluate("() => window.__c4Bridge.readMoveSequenceDetailed()")
-    seq = None
-    source = None
-    if isinstance(detected, dict):
-        seq = detected.get("sequence")
-        source = detected.get("source")
-    elif isinstance(detected, str):
-        seq = detected
-
-    if isinstance(seq, str) and VALID_SEQ_RE.fullmatch(seq):
-        # Ignore stale storage-derived initial value captured at match entry.
-        if source == "storage" and initial_storage_sequence is not None and seq == initial_storage_sequence:
-            return None, manual_sequence, None
-        return seq, seq, source
-
-    if not manual_fallback:
-        return None, manual_sequence, None
-
-    # Do not prompt while the user is still on the setup/lobby URL.
-    # This avoids blocking before the match actually begins.
-    current_url = normalize_url_for_compare(page.url)
-    target_url = normalize_url_for_compare(game_url)
-    if current_url == target_url:
-        return None, manual_sequence, None
-
-    if manual_mode == "full":
-        raw = input("[bridge] Enter current move sequence (digits 1-7), or blank to skip: ").strip()
-        if not raw:
-            return None, manual_sequence, None
-        if not VALID_SEQ_RE.fullmatch(raw):
-            print("[bridge] Invalid sequence format; expected digits 1-7 only")
-            return None, manual_sequence, None
-        print("[bridge] sequence source=manual-full")
-        return raw, raw, "manual"
-
-    # Incremental mode: keep sequence state and only ask for opponent move.
-    if manual_sequence is None:
-        seed = input(
-            "[bridge] Enter known sequence to seed tracking (or blank to skip): "
-        ).strip()
-        if not seed:
-            return None, manual_sequence, None
-        if not VALID_SEQ_RE.fullmatch(seed):
-            print("[bridge] Invalid sequence format; expected digits 1-7 only")
-            return None, manual_sequence, None
-        print("[bridge] sequence source=manual-seed")
-        return seed, seed, "manual"
-
-    if detected_player is not None and is_our_turn(manual_sequence, detected_player):
-        return manual_sequence, manual_sequence, "manual"
-
-    raw = input(
-        "[bridge] Opponent move [1-7], blank=skip, u=undo, r=reset, =SEQ to replace: "
-    ).strip()
-
-    if not raw:
-        return None, manual_sequence, None
-    if raw == "u":
-        if manual_sequence:
-            manual_sequence = manual_sequence[:-1]
-            print(f"[bridge] sequence={manual_sequence}")
-        return None, manual_sequence, None
-    if raw == "r":
-        print("[bridge] sequence reset")
-        return "", "", "manual"
-    if raw.startswith("="):
-        replacement = raw[1:]
-        if not VALID_SEQ_RE.fullmatch(replacement):
-            print("[bridge] Invalid replacement sequence; expected digits 1-7 only")
-            return None, manual_sequence, None
-        return replacement, replacement, "manual"
-    if len(raw) == 1 and raw in "1234567":
-        updated = manual_sequence + raw
-        print("[bridge] sequence source=manual-incremental")
-        return updated, updated, "manual"
-
-    print("[bridge] Invalid input; use 1-7, blank, u, r, or =SEQ")
-    return None, manual_sequence, None
-
-
-def click_column(page, col: int) -> bool:
-    rect = page.evaluate("() => window.__c4Bridge.boardRect()")
-    if not isinstance(rect, dict):
-        print("[bridge] Could not detect board rectangle for click")
-        return False
-
-    width = float(rect["width"])
-    x = float(rect["x"]) + (col + 0.5) * (width / 7.0)
-    y = float(rect["y"]) + 10.0
-    page.mouse.click(x, y)
-    return True
-
-
-def click_column_dom(page, col: int) -> bool:
     try:
-        ok = page.evaluate("(c) => window.__c4Bridge.clickColumnDom(c)", col)
-    except PlaywrightError:
+        parsed = urlparse(current_url)
+    except Exception:
         return False
-    return bool(ok)
 
+    candidate_paths: list[str] = []
+    if parsed.path:
+        candidate_paths.append(parsed.path)
+    # Some SPA transitions can place route info in the URL fragment.
+    if parsed.fragment and parsed.fragment.startswith("/"):
+        candidate_paths.append(parsed.fragment)
 
-def play_column(page, col: int, site_mode: str) -> Optional[str]:
-    # Prefer DOM-targeted clicks in papergames mode, then fallback to coordinate click.
-    if site_mode == "papergames" and click_column_dom(page, col):
-        return "dom"
-    if click_column(page, col):
-        return "coord"
-    return None
+    for raw_path in candidate_paths:
+        path = raw_path.strip("/")
+        if not path:
+            continue
+
+        parts = [p for p in path.split("/") if p]
+        if len(parts) < 3:
+            continue
+
+        locale = parts[0].lower()
+        if not re.fullmatch(r"[a-z]{2}(?:-[a-z]{2})?", locale):
+            continue
+        if parts[1].lower() != "r":
+            continue
+
+        room_code = parts[2]
+        if not re.fullmatch(r"[A-Za-z0-9_-]{6,}", room_code):
+            continue
+
+        return True
+
+    return False
 
 
 def ensure_bridge_ready(page, selectors: list[str], site_mode: str) -> bool:
@@ -994,291 +916,6 @@ def ensure_bridge_ready(page, selectors: list[str], site_mode: str) -> bool:
         return False
 
 
-def probe_sequence(page) -> tuple[Optional[str], Optional[str]]:
-    """Return (sequence, source) where source is one of: cells, storage, or None."""
-    try:
-        detected = page.evaluate("() => window.__c4Bridge.readMoveSequenceDetailed()")
-    except PlaywrightError:
-        return None, None
-
-    if isinstance(detected, dict):
-        seq = detected.get("sequence")
-        source = detected.get("source")
-        if isinstance(seq, str) and VALID_SEQ_RE.fullmatch(seq):
-            return seq, source if isinstance(source, str) else None
-        return None, None
-
-    if isinstance(detected, str) and VALID_SEQ_RE.fullmatch(detected):
-        return detected, None
-
-    return None, None
-
-
-def is_replay_page(page) -> bool:
-    try:
-        return bool(page.evaluate("""
-            () => {
-              const hasFastBack = !!document.querySelector('[aria-label="Fast backward"]');
-              const hasFastForward = !!document.querySelector('[aria-label="Fast forward"]');
-              return hasFastBack && hasFastForward;
-            }
-        """))
-    except PlaywrightError:
-        return False
-
-
-def has_in_game_ui(page) -> bool:
-    """Detect whether the page appears to be an active game UI rather than landing screen."""
-    try:
-        return bool(page.evaluate("""
-            () => {
-              const bodyText = (document.body?.innerText || '').toLowerCase();
-              const hasResignText = bodyText.includes('resign');
-              const hasLeaveRoom = !!document.querySelector('[aria-label="Leave room"]');
-              const hasPlaybackOnly = !!document.querySelector('[aria-label="Fast backward"]') &&
-                                      !!document.querySelector('[aria-label="Fast forward"]');
-              // Playback pages are not active game UI for autoplay.
-              if (hasPlaybackOnly) return false;
-                            return hasResignText || hasLeaveRoom;
-            }
-        """))
-    except PlaywrightError:
-        return False
-
-
-def has_initial_your_turn_text(page) -> bool:
-    """Detect initial papergames turn banner: IT'S YOUR TURN."""
-    try:
-        return bool(page.evaluate("""
-            () => {
-              const text = (document.body?.innerText || '').toLowerCase();
-              const normalized = text.replace(/[’']/g, "'");
-              return normalized.includes("it's your turn") || normalized.includes("its your turn");
-            }
-        """))
-    except PlaywrightError:
-        return False
-
-
-def detect_terminal_page_reason(page) -> Optional[str]:
-    try:
-        reason = page.evaluate("""
-            () => {
-              const text = (document.body?.innerText || '').toLowerCase();
-              const checks = [
-                ['you won', 'you won'],
-                ['you lost', 'you lost'],
-                ['draw', 'draw'],
-                ['timed out', 'timed out'],
-                ['timeout', 'timeout'],
-                ['disconnected', 'disconnected'],
-                ['opponent left', 'opponent left'],
-                ['opponent disconnected', 'opponent disconnected'],
-                                ['opponent aborted', 'opponent aborted'],
-                                ['aborted', 'aborted'],
-                                ['cancelled', 'cancelled'],
-                                ['canceled', 'canceled'],
-                                ['surrendered', 'surrendered'],
-                ['game over', 'game over'],
-              ];
-              for (const [needle, tag] of checks) {
-                if (text.includes(needle)) return tag;
-              }
-              return null;
-            }
-        """)
-    except PlaywrightError:
-        return None
-
-    return reason if isinstance(reason, str) else None
-
-
-def read_post_game_ui_state(page) -> Optional[dict]:
-    try:
-        raw = page.evaluate("""
-            () => {
-              const text = (document.body?.innerText || '').toLowerCase();
-              const clickable = Array.from(document.querySelectorAll('button, [role="button"], a, .btn, [class*="button"]'));
-              const labels = clickable.map((el) => (el.innerText || el.textContent || '').toLowerCase()).join('\n');
-              return {
-                hasRematch: labels.includes('rematch'),
-                hasLeaveRoom: labels.includes('leave room') || !!document.querySelector('[aria-label="Leave room"]'),
-                opponentLeft: text.includes('opponent left') || text.includes('opponent disconnected') || text.includes('disconnected'),
-              };
-            }
-        """)
-    except PlaywrightError:
-        return None
-
-    if not isinstance(raw, dict):
-        return None
-    return {
-        "has_rematch": bool(raw.get("hasRematch")),
-        "has_leave_room": bool(raw.get("hasLeaveRoom")),
-        "opponent_left": bool(raw.get("opponentLeft")),
-    }
-
-
-def click_button_by_text_tokens(page, tokens: list[str]) -> bool:
-    safe_tokens = [t.lower() for t in tokens if t]
-    if not safe_tokens:
-        return False
-    try:
-        ok = page.evaluate(
-            """
-            (tokens) => {
-              const isVisible = (el) => {
-                const r = el.getBoundingClientRect();
-                return r.width > 0 && r.height > 0;
-              };
-              const clickables = Array.from(document.querySelectorAll('button, [role="button"], a, .btn, [class*="button"], [aria-label]'));
-              for (const el of clickables) {
-                const txt = ((el.innerText || el.textContent || '') + ' ' + (el.getAttribute('aria-label') || '')).toLowerCase();
-                if (!tokens.every((t) => txt.includes(t))) continue;
-                if (!isVisible(el)) continue;
-                try {
-                  el.click();
-                  return true;
-                } catch (_) {}
-              }
-              return false;
-            }
-            """,
-            safe_tokens,
-        )
-    except PlaywrightError:
-        return False
-    return bool(ok)
-
-
-def click_leave_room(page) -> bool:
-        # Fast path for explicit ARIA target.
-        try:
-                page.click('[aria-label="Leave room"]', timeout=400)
-                return True
-        except Exception:
-                pass
-
-        # Papergames often renders this as a styled .btn span with nested countdown text.
-        # Prefer native locator clicks, then force/coordinate fallbacks.
-        leave_locators = [
-                "button:has-text('Leave room')",
-                "[role='button']:has-text('Leave room')",
-                "a:has-text('Leave room')",
-                ".btn:has-text('Leave room')",
-                ".front.text.btn.btn-light:has-text('Leave room')",
-                "span.btn.btn-light:has-text('Leave room')",
-                "span.front.text.btn.btn-light:has-text('Leave room')",
-                ".juicy-btn-inner:has-text('Leave room')",
-                "span:has-text('Leave room')",
-        ]
-        for sel in leave_locators:
-                try:
-                        page.locator(sel).first.click(timeout=700)
-                        return True
-                except Exception:
-                        try:
-                                page.locator(sel).first.click(timeout=700, force=True)
-                                return True
-                        except Exception:
-                                try:
-                                        box = page.locator(sel).first.bounding_box()
-                                        if box is not None and box.get("width", 0) > 0 and box.get("height", 0) > 0:
-                                                cx = box["x"] + box["width"] / 2.0
-                                                cy = box["y"] + box["height"] / 2.0
-                                                page.mouse.click(cx, cy)
-                                                return True
-                                except Exception:
-                                        pass
-
-        # Fallback: find text node container and click nearest likely clickable ancestor.
-        try:
-                ok = page.evaluate(
-                        r"""
-                        () => {
-                            const isVisible = (el) => {
-                                const r = el.getBoundingClientRect();
-                                return r.width > 0 && r.height > 0;
-                            };
-                            const canClick = (el) => {
-                                if (!el || !isVisible(el)) return false;
-                                const disabled = (el.getAttribute('disabled') !== null) ||
-                                                                 (el.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
-                                return !disabled;
-                            };
-                            const nodes = Array.from(document.querySelectorAll('button, [role="button"], a, .btn, .juicy-btn-inner, span'));
-                            for (const el of nodes) {
-                                const txt = (el.textContent || '').toLowerCase().replace(/\s+/g, ' ').trim();
-                                if (!txt.includes('leave room')) continue;
-
-                                let cur = el;
-                                for (let i = 0; i < 5 && cur; i++) {
-                                    if (canClick(cur)) {
-                                        try {
-                                            cur.click();
-                                            return true;
-                                        } catch (_) {}
-                                    }
-                                    cur = cur.parentElement;
-                                }
-                            }
-                            return false;
-                        }
-                        """
-                )
-                if bool(ok):
-                        return True
-        except PlaywrightError:
-                pass
-
-        return click_button_by_text_tokens(page, ["leave room"])
-
-
-def click_rematch(page) -> bool:
-    return click_button_by_text_tokens(page, ["rematch"])
-
-
-def click_play_online_random(page) -> bool:
-    # Prefer a direct native click on papergames' juicy card CTA first.
-    # This avoids cases where synthetic DOM .click() on inner spans is ignored.
-    try:
-        page.locator(
-            ".juicy-btn-inner:has-text('Play online'):has-text('random player')"
-        ).first.click(timeout=600)
-        return True
-    except Exception:
-        pass
-    return click_button_by_text_tokens(page, ["play online", "random player"])
-
-
-def click_play_online(page) -> bool:
-    return click_button_by_text_tokens(page, ["play online"])
-
-
-def click_random_player(page) -> bool:
-    return click_button_by_text_tokens(page, ["random player"])
-
-
-def try_click_queue_controls(page) -> bool:
-    """Try common papergames queue flows.
-
-    Some flows expose one combined CTA, while others require clicking
-    "Play online" then selecting "Random player".
-    """
-    if click_play_online_random(page):
-        return True
-    if click_random_player(page):
-        return True
-    if click_play_online(page):
-        # Best-effort second step if a picker appears after the first click.
-        time.sleep(0.15)
-        if click_random_player(page):
-            return True
-        # Do not report success yet; keep retrying until random-player queue is selected.
-        return False
-    return False
-
-
 def record_slow_solve(sequence: str, elapsed_sec: float, weak: bool) -> None:
     try:
         os.makedirs(os.path.dirname(SLOW_SOLVE_LOG_PATH), exist_ok=True)
@@ -1292,6 +929,13 @@ def record_slow_solve(sequence: str, elapsed_sec: float, weak: bool) -> None:
 
 def main() -> int:
     args = parse_args()
+    our_username = sanitize_username(args.our_username) if args.our_username else None
+
+    stats = BridgeStats(args.stats_json, args.stats_csv)
+    stats.load()
+    if args.stats_reset:
+        stats.reset()
+        print("[bridge] Stats reset requested; cleared JSON/CSV history")
 
     if not os.path.exists(args.solver):
         print(f"[bridge] Solver not found at: {args.solver}")
@@ -1314,11 +958,23 @@ def main() -> int:
     else:
         site_mode = "papergames" if "papergames.io" in host else "generic"
 
+    if site_mode == "papergames" and our_username is None:
+        print("[bridge] Tip: set --our-username to reduce self-as-opponent misclassification")
+
     print("[bridge] Starting browser bridge")
     print(f"[bridge] URL: {args.url}")
     print(f"[bridge] Browser: {args.browser}")
     print(f"[bridge] Site mode: {site_mode}")
     print(f"[bridge] Mode: {args.mode}, player={args.player}, weak={args.weak}")
+    print(f"[bridge] Stats: {stats.summary_line()}")
+    if args.debug_parse:
+        print("[bridge] Parse debug logging enabled (anomaly paths only)")
+    if args.mode == "auto":
+        print("[bridge] Operator commands: pause | resume | status | wait <sec> | quit")
+        if args.auto_max_runtime_sec and args.auto_max_runtime_sec > 0:
+            print(f"[bridge] Auto max runtime: {float(args.auto_max_runtime_sec):.1f}s")
+        if PromptSession is None:
+            print("[bridge] Tip: install prompt_toolkit for a pinned command prompt (logs above, input below)")
     print("[bridge] Press Ctrl+C to stop")
 
     last_sequence: Optional[str] = None
@@ -1363,6 +1019,312 @@ def main() -> int:
     queued_click_at: Optional[float] = None
     last_queue_click_attempt_at = 0.0
     last_post_game_action_attempt_at = 0.0
+    current_opponent: Optional[str] = None
+    game_result_recorded = False
+    game_solve_total_sec = 0.0
+    game_solve_samples = 0
+    debug_event_last_log: dict[str, float] = {}
+    auto_control_state = "running"  # running | draining | paused
+    auto_runtime_start_at = time.time() if args.mode == "auto" else 0.0
+    auto_runtime_limit_sec = (
+        float(args.auto_max_runtime_sec)
+        if args.mode == "auto" and args.auto_max_runtime_sec and args.auto_max_runtime_sec > 0
+        else None
+    )
+    auto_runtime_hard_limit_sec = auto_runtime_limit_sec * 2.0 if auto_runtime_limit_sec is not None else None
+    auto_runtime_timeout_triggered = False
+    auto_runtime_hard_timeout_triggered = False
+    auto_quit_after_drain = False
+    exit_requested_after_drain = False
+    timeout_summary_printed = False
+    post_game_wait_sec_runtime = max(0.0, float(args.post_game_wait_sec))
+    operator_cmd_queue: queue.Queue[str] = queue.Queue()
+    operator_console_stop = threading.Event()
+    operator_console_started = False
+    last_observed_url = args.url
+
+    def _snapshot_totals() -> tuple[int, int, int, int]:
+        totals = stats.data.get("totals") if isinstance(stats.data, dict) else None
+        if not isinstance(totals, dict):
+            return (0, 0, 0, 0)
+        wins = int(totals.get("wins", 0) or 0)
+        losses = int(totals.get("losses", 0) or 0)
+        draws = int(totals.get("draws", 0) or 0)
+        games = int(totals.get("games", 0) or 0)
+        return (wins, losses, draws, games)
+
+    session_start_w, session_start_l, session_start_d, session_start_g = _snapshot_totals()
+
+    def print_timeout_shutdown_summary(reason: str) -> None:
+        nonlocal timeout_summary_printed
+        if timeout_summary_printed:
+            return
+        timeout_summary_printed = True
+        elapsed = max(0.0, time.time() - auto_runtime_start_at)
+        end_w, end_l, end_d, end_g = _snapshot_totals()
+        print(
+            "[bridge] Timeout shutdown summary: "
+            f"reason={reason} elapsed_sec={elapsed:.1f} "
+            f"session W-L-D={end_w - session_start_w}-{end_l - session_start_l}-{end_d - session_start_d} "
+            f"(games={end_g - session_start_g})"
+        )
+
+    def reset_runtime_for_next_match(
+        *,
+        seeking_new_match_value: Optional[bool] = None,
+        post_game_waiting_empty_value: Optional[bool] = None,
+    ) -> None:
+        nonlocal match_active
+        nonlocal post_game_mode
+        nonlocal post_game_started_at
+        nonlocal last_sequence
+        nonlocal detected_player
+        nonlocal manual_sequence
+        nonlocal initial_storage_sequence
+        nonlocal pending_expected_sequence
+        nonlocal pending_base_sequence
+        nonlocal pending_col
+        nonlocal pending_retry_attempted
+        nonlocal pending_move_started_at
+        nonlocal blocked_sequence
+        nonlocal blocked_sequence_until
+        nonlocal grid_seq_candidate
+        nonlocal grid_seq_candidate_count
+        nonlocal inferred_move_candidate
+        nonlocal inferred_move_candidate_count
+        nonlocal last_grid_col_counts
+        nonlocal tracked_grid_sequence
+        nonlocal last_suggested_col
+        nonlocal last_suggested_at
+        nonlocal empty_grid_streak
+        nonlocal last_solved_sequence
+        nonlocal last_solved_col
+        nonlocal last_logged_suggestion_seq
+        nonlocal last_logged_suggestion_col
+        nonlocal auto_side_probe_started_at
+        nonlocal seeking_new_match
+        nonlocal post_game_waiting_empty
+
+        reset = RuntimeResetState.for_next_match(fixed_player)
+        match_active = reset.match_active
+        post_game_mode = reset.post_game_mode
+        post_game_started_at = reset.post_game_started_at
+        last_sequence = reset.last_sequence
+        detected_player = reset.detected_player
+        manual_sequence = reset.manual_sequence
+        initial_storage_sequence = reset.initial_storage_sequence
+        pending_expected_sequence = reset.pending_expected_sequence
+        pending_base_sequence = reset.pending_base_sequence
+        pending_col = reset.pending_col
+        pending_retry_attempted = reset.pending_retry_attempted
+        pending_move_started_at = reset.pending_move_started_at
+        blocked_sequence = reset.blocked_sequence
+        blocked_sequence_until = reset.blocked_sequence_until
+        grid_seq_candidate = reset.grid_seq_candidate
+        grid_seq_candidate_count = reset.grid_seq_candidate_count
+        inferred_move_candidate = reset.inferred_move_candidate
+        inferred_move_candidate_count = reset.inferred_move_candidate_count
+        last_grid_col_counts = reset.last_grid_col_counts
+        tracked_grid_sequence = reset.tracked_grid_sequence
+        last_suggested_col = reset.last_suggested_col
+        last_suggested_at = reset.last_suggested_at
+        empty_grid_streak = reset.empty_grid_streak
+        last_solved_sequence = reset.last_solved_sequence
+        last_solved_col = reset.last_solved_col
+        last_logged_suggestion_seq = reset.last_logged_suggestion_seq
+        last_logged_suggestion_col = reset.last_logged_suggestion_col
+        auto_side_probe_started_at = reset.auto_side_probe_started_at
+
+        if seeking_new_match_value is not None:
+            seeking_new_match = seeking_new_match_value
+        if post_game_waiting_empty_value is not None:
+            post_game_waiting_empty = post_game_waiting_empty_value
+
+    def set_auto_control_paused(reason: str) -> None:
+        nonlocal auto_control_state
+        nonlocal post_game_mode
+        nonlocal post_game_started_at
+        nonlocal seeking_new_match
+
+        auto_control_state = "paused"
+        post_game_mode = False
+        post_game_started_at = None
+        seeking_new_match = False
+        print(f"[bridge] Auto paused: {reason}")
+
+    def on_game_resolved_maybe_pause() -> bool:
+        nonlocal auto_control_state
+        nonlocal exit_requested_after_drain
+        if args.mode == "auto" and auto_control_state == "draining":
+            set_auto_control_paused("current game resolved")
+            if auto_quit_after_drain:
+                print("[bridge] Auto runtime limit reached: current game resolved; quitting")
+                exit_requested_after_drain = True
+            return True
+        return False
+
+    def handle_terminal_transition(reason: str, context: str, sequence_len_hint: Optional[int] = None) -> bool:
+        """Record terminal outcome, clear pending move state, and enter post-game flow.
+
+        Returns True when caller should continue loop processing.
+        """
+        nonlocal game_result_recorded
+        nonlocal post_game_mode
+        nonlocal post_game_started_at
+        nonlocal pending_expected_sequence
+        nonlocal pending_base_sequence
+        nonlocal pending_col
+        nonlocal pending_retry_attempted
+        nonlocal pending_move_started_at
+
+        print(f"[bridge] {context}: {reason}")
+        if not game_result_recorded:
+            mapped = result_from_terminal_reason(reason, detected_player)
+            if mapped is not None:
+                stats.record_game(
+                    mapped,
+                    detected_player,
+                    current_opponent,
+                    sequence_len_hint if sequence_len_hint is not None else len(last_sequence or ""),
+                    game_solve_samples,
+                    game_solve_total_sec,
+                )
+                game_result_recorded = True
+                print(f"[bridge] Stats updated: {stats.summary_line()}")
+
+        pending_expected_sequence = None
+        pending_base_sequence = None
+        pending_col = None
+        pending_retry_attempted = False
+        pending_move_started_at = None
+
+        if on_game_resolved_maybe_pause():
+            return True
+
+        post_game_mode = True
+        post_game_started_at = time.time()
+        return True
+
+    def process_operator_command(cmd: str) -> bool:
+        """Process one runtime operator command; returns True when bridge should exit."""
+        nonlocal auto_control_state
+        nonlocal post_game_wait_sec_runtime
+        cmd = cmd.strip().lower()
+        if not cmd:
+            return False
+
+        if cmd in {"quit", "q", "exit"}:
+            print("[bridge] Quit requested by operator")
+            return True
+
+        if cmd in {"help", "h", "?"}:
+            print("[bridge] Commands: pause | resume | status | wait <sec> | quit")
+            return False
+
+        parts = cmd.split()
+        if parts and parts[0] in {"wait", "postwait", "post-game-wait"}:
+            if len(parts) == 1:
+                print(f"[bridge] Current post-game wait: {post_game_wait_sec_runtime:.1f}s")
+                return False
+            if len(parts) != 2:
+                print("[bridge] Usage: wait <seconds>")
+                return False
+            try:
+                new_wait = float(parts[1])
+            except ValueError:
+                print("[bridge] wait expects a number, e.g. 'wait 6.5'")
+                return False
+            if new_wait < 0:
+                print("[bridge] wait must be >= 0")
+                return False
+            post_game_wait_sec_runtime = new_wait
+            print(f"[bridge] Updated post-game wait to {post_game_wait_sec_runtime:.1f}s")
+            return False
+
+        if cmd in {"status", "s"}:
+            in_live_room = site_mode == "papergames" and is_papergames_live_room_url(last_observed_url)
+            runtime_info = ""
+            if auto_runtime_limit_sec is not None:
+                elapsed = max(0.0, time.time() - auto_runtime_start_at)
+                remaining = max(0.0, auto_runtime_limit_sec - elapsed)
+                hard_remaining = (
+                    max(0.0, auto_runtime_hard_limit_sec - elapsed)
+                    if auto_runtime_hard_limit_sec is not None
+                    else 0.0
+                )
+                runtime_info = (
+                    f" auto_runtime_limit_sec={auto_runtime_limit_sec:.1f}"
+                    f" auto_runtime_remaining_sec={remaining:.1f}"
+                    f" auto_runtime_hard_remaining_sec={hard_remaining:.1f}"
+                )
+            print(
+                "[bridge] Control status: "
+                f"state={auto_control_state} match_active={match_active} "
+                f"post_game_mode={post_game_mode} seeking_new_match={seeking_new_match} "
+                f"live_room_url={in_live_room} "
+                f"post_game_wait_sec={post_game_wait_sec_runtime:.1f}"
+                f"{runtime_info}"
+            )
+            return False
+
+        if cmd in {"pause", "p", "stop"}:
+            if auto_control_state == "paused":
+                print("[bridge] Already paused")
+                return False
+            in_live_room = site_mode == "papergames" and is_papergames_live_room_url(last_observed_url)
+            if post_game_mode:
+                set_auto_control_paused("paused immediately")
+                return False
+            if not match_active and not in_live_room:
+                set_auto_control_paused("paused immediately")
+                return False
+
+            auto_control_state = "draining"
+            print("[bridge] Drain requested: will pause after current game resolves")
+            return False
+
+        if cmd in {"resume", "r", "run"}:
+            if auto_control_state == "running":
+                print("[bridge] Already running")
+                return False
+            auto_control_state = "running"
+            print("[bridge] Auto resumed")
+            return False
+
+        print(f"[bridge] Unknown command: {cmd}. Try: pause | resume | status | wait <sec> | quit")
+        return False
+
+    def handle_operator_command() -> bool:
+        """Handle runtime operator commands; returns True when bridge should exit."""
+        if args.mode != "auto":
+            return False
+
+        while True:
+            try:
+                queued_cmd = operator_cmd_queue.get_nowait()
+            except queue.Empty:
+                break
+            if process_operator_command(queued_cmd):
+                return True
+
+        # When the prompt_toolkit command line is active, it owns stdin.
+        # Do not race it with direct readline polling.
+        if operator_console_started:
+            return False
+
+        try:
+            ready, _, _ = select.select([sys.stdin], [], [], 0.0)
+        except Exception:
+            return False
+
+        if not ready:
+            return False
+
+        raw = sys.stdin.readline()
+        if raw is None:
+            return False
+
+        return process_operator_command(raw)
 
     try:
         with sync_playwright() as p:
@@ -1436,10 +1398,376 @@ def main() -> int:
             page.evaluate("(selectors) => window.__c4Bridge.setSelectors(selectors)", config.board_selectors)
             page.evaluate("(mode) => window.__c4Bridge.setSiteMode(mode)", site_mode)
 
+            def start_operator_console() -> None:
+                nonlocal operator_console_started
+                if operator_console_started:
+                    return
+                if args.mode != "auto":
+                    return
+                if PromptSession is None:
+                    return
+                if not sys.stdin.isatty() or not sys.stdout.isatty():
+                    return
+
+                def operator_prompt_loop() -> None:
+                    session = PromptSession("[bridge cmd] ")
+                    with patch_stdout():
+                        while not operator_console_stop.is_set():
+                            try:
+                                raw = session.prompt()
+                            except KeyboardInterrupt:
+                                # Keep Ctrl+C as a fast stop signal when prompt mode owns stdin.
+                                operator_cmd_queue.put("quit")
+                                break
+                            except EOFError:
+                                break
+                            if raw is None:
+                                continue
+                            cmd = raw.strip()
+                            if not cmd:
+                                continue
+                            operator_cmd_queue.put(cmd)
+
+                t = threading.Thread(target=operator_prompt_loop, daemon=True)
+                t.start()
+                operator_console_started = True
+                print("[bridge] Pinned operator prompt enabled: use '[bridge cmd]' line for commands")
+
+            start_operator_console()
+
+            def debug_log_event(
+                event: str,
+                payload: Optional[dict] = None,
+                min_interval_sec: float = 2.0,
+            ) -> None:
+                if not args.debug_parse:
+                    return
+                now = time.time()
+                last = debug_event_last_log.get(event, 0.0)
+                if now - last < min_interval_sec:
+                    return
+                debug_event_last_log[event] = now
+
+                body: dict = {"event": event}
+                if isinstance(payload, dict):
+                    body["payload"] = payload
+                print(f"[bridge][debug] {json.dumps(body, sort_keys=True)}")
+
+            def debug_log_parse_snapshot(
+                event: str,
+                payload: Optional[dict] = None,
+                min_interval_sec: float = 2.0,
+            ) -> None:
+                if not args.debug_parse:
+                    return
+                snap_payload = dict(payload) if isinstance(payload, dict) else {}
+                try:
+                    snap_payload["snapshot"] = page.evaluate(
+                        """
+                        () => {
+                          const raw = (window.__c4Bridge && window.__c4Bridge.readMoveSequenceDetailed)
+                            ? window.__c4Bridge.readMoveSequenceDetailed()
+                            : null;
+                          const counts = (window.__c4Bridge && window.__c4Bridge.readGridColumnCounts)
+                            ? window.__c4Bridge.readGridColumnCounts()
+                            : null;
+                          return { raw, counts };
+                        }
+                        """
+                    )
+                except PlaywrightError as exc:
+                    snap_payload["snapshot_error"] = str(exc)
+                debug_log_event(event, snap_payload, min_interval_sec=min_interval_sec)
+
+            def debug_log_opponent_probe(min_interval_sec: float = 8.0) -> Optional[str]:
+                try:
+                    raw = page.evaluate(
+                        r"""
+                        () => {
+                          const pull = (s) => {
+                            if (!s) return null;
+                            const t = String(s).trim();
+                            return t.length ? t : null;
+                          };
+
+                          const labelRegex = /\bopponent\b\s*[:\-]?\s*([A-Za-z0-9_.\- ]{2,32})/i;
+                          const body = document.body?.innerText || '';
+                          const mBody = body.match(labelRegex);
+                          const labelCandidate = (mBody && mBody[1]) ? pull(mBody[1]) : null;
+
+                                                    const addUnique = (arr, v) => {
+                                                        if (!v) return;
+                                                        if (!arr.includes(v)) arr.push(v);
+                                                    };
+
+                                                    const opponentProfiles = [];
+                                                    const opponentAnchors = Array.from(
+                                                        document.querySelectorAll('[class*="opponent" i], [id*="opponent" i], [aria-label*="opponent" i]')
+                                                    );
+                                                    const nameSel = '[appprofileopener], [appProfileOpener], [class*="profile" i], [class*="username" i], [data-username], [title]';
+                                                    for (const anchor of opponentAnchors) {
+                                                        const local = Array.from(anchor.querySelectorAll(nameSel));
+                                                        for (const el of local) {
+                                                            const txt = pull(el.innerText || el.textContent || el.getAttribute('data-username') || el.getAttribute('title') || '');
+                                                            addUnique(opponentProfiles, txt);
+                                                        }
+
+                                                        const parent = anchor.parentElement;
+                                                        if (parent) {
+                                                            const nearby = Array.from(parent.querySelectorAll(nameSel));
+                                                            for (const el of nearby) {
+                                                                const txt = pull(el.innerText || el.textContent || el.getAttribute('data-username') || el.getAttribute('title') || '');
+                                                                addUnique(opponentProfiles, txt);
+                                                            }
+                                                        }
+                                                    }
+
+                                                    const roomProfiles = [];
+                                                    const boardCell = document.querySelector('.grid-item');
+                                                    const gameRoot = document.querySelector('#game') ||
+                                                        (boardCell ? boardCell.closest('#game, [class*="game" i], [id*="game" i], [class*="room" i], [id*="room" i]') : null);
+                                                    if (gameRoot) {
+                                                        const roomNameEls = Array.from(gameRoot.querySelectorAll(nameSel));
+                                                        for (const el of roomNameEls) {
+                                                            const txt = pull(el.innerText || el.textContent || el.getAttribute('data-username') || el.getAttribute('title') || '');
+                                                            addUnique(roomProfiles, txt);
+                                                        }
+                                                    }
+
+                                                    const roomPlayerProfiles = [];
+                                                    const roomPlayers = document.querySelector('app-room-players');
+                                                    if (roomPlayers) {
+                                                        const profileEls = Array.from(
+                                                            roomPlayers.querySelectorAll(
+                                                                'span[appprofileopener], span[appProfileOpener], [appprofileopener], [appProfileOpener]'
+                                                            )
+                                                        );
+                                                        for (const el of profileEls) {
+                                                            const txt = pull(el.innerText || el.textContent || el.getAttribute('data-username') || el.getAttribute('title') || '');
+                                                            addUnique(roomPlayerProfiles, txt);
+                                                        }
+                                                    }
+
+                                                    const boardNearbyProfiles = [];
+                                                    if (boardCell) {
+                                                        const boardRect = boardCell.getBoundingClientRect();
+                                                        const boardLeft = boardRect.left;
+                                                        const boardRight = boardRect.right;
+                                                        const boardTop = boardRect.top;
+
+                                                        const nearNameEls = Array.from(
+                                                            document.querySelectorAll(
+                                                                '[appprofileopener], [appProfileOpener], span.text-truncate.cursor-pointer, [class*="text-truncate" i][class*="cursor-pointer" i], [class*="username" i], [data-username]'
+                                                            )
+                                                        );
+
+                                                        for (const el of nearNameEls) {
+                                                            const rect = el.getBoundingClientRect();
+                                                            if (rect.width <= 0 || rect.height <= 0) continue;
+                                                            const cx = rect.left + rect.width / 2;
+                                                            const cy = rect.top + rect.height / 2;
+                                                            const withinX = cx >= (boardLeft - 220) && cx <= (boardRight + 220);
+                                                            const aboveBoard = cy <= (boardTop + 120);
+                                                            if (!withinX || !aboveBoard) continue;
+
+                                                            const txt = pull(el.innerText || el.textContent || el.getAttribute('data-username') || el.getAttribute('title') || '');
+                                                            addUnique(boardNearbyProfiles, txt);
+                                                        }
+                                                    }
+
+                                                    return { labelCandidate, opponentProfiles, roomProfiles, roomPlayerProfiles, boardNearbyProfiles };
+                        }
+                        """
+                    )
+                except PlaywrightError as exc:
+                    debug_log_event("opponent_parse_probe_failed", {"error": str(exc)}, min_interval_sec=min_interval_sec)
+                    return None
+
+                label_candidate = None
+                opponent_profile_candidates: list[str] = []
+                room_profile_candidates: list[str] = []
+                room_player_profile_candidates: list[str] = []
+                board_nearby_profile_candidates: list[str] = []
+                if isinstance(raw, dict):
+                    label_candidate = raw.get("labelCandidate")
+                    raw_opp_profiles = raw.get("opponentProfiles")
+                    if isinstance(raw_opp_profiles, list):
+                        opponent_profile_candidates = [p for p in raw_opp_profiles if isinstance(p, str)]
+                    raw_room_profiles = raw.get("roomProfiles")
+                    if isinstance(raw_room_profiles, list):
+                        room_profile_candidates = [p for p in raw_room_profiles if isinstance(p, str)]
+                    raw_room_player_profiles = raw.get("roomPlayerProfiles")
+                    if isinstance(raw_room_player_profiles, list):
+                        room_player_profile_candidates = [p for p in raw_room_player_profiles if isinstance(p, str)]
+                    raw_board_profiles = raw.get("boardNearbyProfiles")
+                    if isinstance(raw_board_profiles, list):
+                        board_nearby_profile_candidates = [p for p in raw_board_profiles if isinstance(p, str)]
+
+                sanitized_label = sanitize_username(label_candidate) if isinstance(label_candidate, str) else None
+                if sanitized_label is not None and usernames_equivalent(sanitized_label, our_username):
+                    sanitized_label = None
+
+                sanitized_opponent_profiles: list[str] = []
+                for name in opponent_profile_candidates:
+                    cleaned = sanitize_username(name)
+                    if cleaned is None:
+                        continue
+                    if usernames_equivalent(cleaned, our_username):
+                        continue
+                    if cleaned in sanitized_opponent_profiles:
+                        continue
+                    sanitized_opponent_profiles.append(cleaned)
+
+                sanitized_room_profiles: list[str] = []
+                for name in room_profile_candidates:
+                    cleaned = sanitize_username(name)
+                    if cleaned is None:
+                        continue
+                    if usernames_equivalent(cleaned, our_username):
+                        continue
+                    if cleaned in sanitized_room_profiles:
+                        continue
+                    sanitized_room_profiles.append(cleaned)
+
+                sanitized_room_player_profiles: list[str] = []
+                for name in room_player_profile_candidates:
+                    cleaned = sanitize_username(name)
+                    if cleaned is None:
+                        continue
+                    if usernames_equivalent(cleaned, our_username):
+                        continue
+                    if cleaned in sanitized_room_player_profiles:
+                        continue
+                    sanitized_room_player_profiles.append(cleaned)
+
+                sanitized_board_nearby_profiles: list[str] = []
+                for name in board_nearby_profile_candidates:
+                    cleaned = sanitize_username(name)
+                    if cleaned is None:
+                        continue
+                    if usernames_equivalent(cleaned, our_username):
+                        continue
+                    if cleaned in sanitized_board_nearby_profiles:
+                        continue
+                    sanitized_board_nearby_profiles.append(cleaned)
+
+                fallback_candidate: Optional[str] = None
+                # Use only higher-confidence sources for fallback detection.
+                # Do not use body label regex fallback here; it is too noisy on some pages.
+                for c in (
+                    sanitized_room_player_profiles
+                    + sanitized_board_nearby_profiles
+                    + sanitized_opponent_profiles
+                    + sanitized_room_profiles
+                ):
+                    if isinstance(c, str) and c:
+                        fallback_candidate = c
+                        break
+
+                debug_log_event(
+                    "opponent_parse_miss",
+                    {
+                        "label_candidate": label_candidate,
+                        "label_sanitized": sanitized_label,
+                        "opponent_profile_candidates": opponent_profile_candidates,
+                        "opponent_profiles_sanitized": sanitized_opponent_profiles,
+                        "room_profile_candidates": room_profile_candidates,
+                        "room_profiles_sanitized": sanitized_room_profiles,
+                        "room_player_profile_candidates": room_player_profile_candidates,
+                        "room_player_profiles_sanitized": sanitized_room_player_profiles,
+                        "board_nearby_profile_candidates": board_nearby_profile_candidates,
+                        "board_nearby_profiles_sanitized": sanitized_board_nearby_profiles,
+                    },
+                    min_interval_sec=min_interval_sec,
+                )
+                return fallback_candidate
+
             while True:
                 if page.is_closed():
                     print("[bridge] Page was closed; stopping bridge")
                     return 0
+
+                if exit_requested_after_drain:
+                    print_timeout_shutdown_summary("soft-timeout-drain-complete")
+                    return 0
+
+                try:
+                    last_observed_url = page.url
+                except Exception:
+                    pass
+
+                if handle_operator_command():
+                    return 0
+
+                if (
+                    args.mode == "auto"
+                    and auto_runtime_hard_limit_sec is not None
+                    and not auto_runtime_hard_timeout_triggered
+                ):
+                    now = time.time()
+                    elapsed = now - auto_runtime_start_at
+                    if elapsed >= auto_runtime_hard_limit_sec:
+                        auto_runtime_hard_timeout_triggered = True
+                        print(
+                            "[bridge] Auto hard runtime limit reached "
+                            f"({elapsed:.1f}s): force quitting"
+                        )
+                        print_timeout_shutdown_summary("hard-timeout-force-quit")
+                        return 0
+
+                if (
+                    args.mode == "auto"
+                    and auto_runtime_limit_sec is not None
+                    and not auto_runtime_timeout_triggered
+                ):
+                    now = time.time()
+                    elapsed = now - auto_runtime_start_at
+                    if elapsed >= auto_runtime_limit_sec:
+                        auto_runtime_timeout_triggered = True
+                        auto_quit_after_drain = True
+
+                        in_live_room = (
+                            site_mode == "papergames"
+                            and is_papergames_live_room_url(last_observed_url)
+                        )
+
+                        if post_game_mode:
+                            print(
+                                "[bridge] Auto runtime limit reached "
+                                f"({elapsed:.1f}s): game already resolved; quitting"
+                            )
+                            print_timeout_shutdown_summary("soft-timeout-post-game")
+                            return 0
+
+                        if auto_control_state == "paused":
+                            print(
+                                "[bridge] Auto runtime limit reached "
+                                f"({elapsed:.1f}s) while paused; quitting"
+                            )
+                            print_timeout_shutdown_summary("soft-timeout-paused")
+                            return 0
+
+                        if not match_active and not in_live_room:
+                            print(
+                                "[bridge] Auto runtime limit reached "
+                                f"({elapsed:.1f}s) with no active game; quitting"
+                            )
+                            print_timeout_shutdown_summary("soft-timeout-no-active-game")
+                            return 0
+
+                        auto_control_state = "draining"
+                        print(
+                            "[bridge] Auto runtime limit reached "
+                            f"({elapsed:.1f}s): drain requested; will quit after current game resolves"
+                        )
+
+                if args.mode == "auto" and auto_control_state == "paused":
+                    now = time.time()
+                    if now - last_wait_log >= 5.0:
+                        print("[bridge] Auto paused; waiting for 'resume' or 'quit'")
+                        last_wait_log = now
+                    time.sleep(args.poll_ms / 1000.0)
+                    continue
 
                 if args.mode == "auto" and site_mode == "papergames" and post_game_mode:
                     now = time.time()
@@ -1447,11 +1775,11 @@ def main() -> int:
                         post_game_started_at = now
                     post_game_elapsed = now - post_game_started_at
 
-                    if post_game_elapsed < args.post_game_wait_sec:
+                    if post_game_elapsed < post_game_wait_sec_runtime:
                         if now - last_lifecycle_log >= 2.0:
                             print(
                                 "[bridge] Terminal wait before post-game action... "
-                                f"({post_game_elapsed:.1f}/{args.post_game_wait_sec:.1f}s)"
+                                f"({post_game_elapsed:.1f}/{post_game_wait_sec_runtime:.1f}s)"
                             )
                             last_lifecycle_log = now
                         time.sleep(args.poll_ms / 1000.0)
@@ -1462,36 +1790,10 @@ def main() -> int:
                     # and switch directly to the matchmaking flow.
                     if in_lobby_url(page.url, args.url) and not has_in_game_ui(page):
                         print("[bridge] Post-game redirect to lobby detected; queueing next match")
-                        match_active = False
-                        post_game_mode = False
-                        post_game_started_at = None
-                        post_game_waiting_empty = False
-                        seeking_new_match = True
-                        last_sequence = None
-                        detected_player = fixed_player
-                        manual_sequence = None
-                        initial_storage_sequence = None
-                        pending_expected_sequence = None
-                        pending_base_sequence = None
-                        pending_col = None
-                        pending_retry_attempted = False
-                        pending_move_started_at = None
-                        blocked_sequence = None
-                        blocked_sequence_until = 0.0
-                        grid_seq_candidate = None
-                        grid_seq_candidate_count = 0
-                        inferred_move_candidate = None
-                        inferred_move_candidate_count = 0
-                        last_grid_col_counts = None
-                        tracked_grid_sequence = None
-                        last_suggested_col = None
-                        last_suggested_at = 0.0
-                        empty_grid_streak = 0
-                        last_solved_sequence = None
-                        last_solved_col = None
-                        last_logged_suggestion_seq = None
-                        last_logged_suggestion_col = None
-                        auto_side_probe_started_at = None
+                        reset_runtime_for_next_match(
+                            seeking_new_match_value=True,
+                            post_game_waiting_empty_value=False,
+                        )
                         time.sleep(args.poll_ms / 1000.0)
                         continue
 
@@ -1512,69 +1814,11 @@ def main() -> int:
                                 seeking_new_match = True
 
                         if quick_acted:
-                            match_active = False
-                            post_game_mode = False
-                            post_game_started_at = None
-                            last_sequence = None
-                            detected_player = fixed_player
-                            manual_sequence = None
-                            initial_storage_sequence = None
-                            pending_expected_sequence = None
-                            pending_base_sequence = None
-                            pending_col = None
-                            pending_retry_attempted = False
-                            pending_move_started_at = None
-                            blocked_sequence = None
-                            blocked_sequence_until = 0.0
-                            grid_seq_candidate = None
-                            grid_seq_candidate_count = 0
-                            inferred_move_candidate = None
-                            inferred_move_candidate_count = 0
-                            last_grid_col_counts = None
-                            tracked_grid_sequence = None
-                            last_suggested_col = None
-                            last_suggested_at = 0.0
-                            empty_grid_streak = 0
-                            last_solved_sequence = None
-                            last_solved_col = None
-                            last_logged_suggestion_seq = None
-                            last_logged_suggestion_col = None
-                            auto_side_probe_started_at = None
+                            reset_runtime_for_next_match()
                             time.sleep(args.poll_ms / 1000.0)
                             continue
 
                     def post_game_reload_fallback(reason: str) -> None:
-                        nonlocal match_active
-                        nonlocal last_sequence
-                        nonlocal detected_player
-                        nonlocal manual_sequence
-                        nonlocal initial_storage_sequence
-                        nonlocal pending_expected_sequence
-                        nonlocal pending_base_sequence
-                        nonlocal pending_col
-                        nonlocal pending_retry_attempted
-                        nonlocal pending_move_started_at
-                        nonlocal blocked_sequence
-                        nonlocal blocked_sequence_until
-                        nonlocal grid_seq_candidate
-                        nonlocal grid_seq_candidate_count
-                        nonlocal inferred_move_candidate
-                        nonlocal inferred_move_candidate_count
-                        nonlocal last_grid_col_counts
-                        nonlocal tracked_grid_sequence
-                        nonlocal last_suggested_col
-                        nonlocal last_suggested_at
-                        nonlocal empty_grid_streak
-                        nonlocal last_solved_sequence
-                        nonlocal last_solved_col
-                        nonlocal last_logged_suggestion_seq
-                        nonlocal last_logged_suggestion_col
-                        nonlocal auto_side_probe_started_at
-                        nonlocal post_game_mode
-                        nonlocal post_game_started_at
-                        nonlocal post_game_waiting_empty
-                        nonlocal seeking_new_match
-
                         print(f"[bridge] Post-game fallback: {reason}; reloading lobby")
                         try:
                             page.goto(args.url, wait_until="domcontentloaded", timeout=60000)
@@ -1583,36 +1827,10 @@ def main() -> int:
                             print(f"[bridge] Post-game fallback reload failed: {exc}")
 
                         # Reset match tracking and queue up new match flow.
-                        match_active = False
-                        post_game_mode = False
-                        post_game_started_at = None
-                        post_game_waiting_empty = False
-                        seeking_new_match = True
-                        last_sequence = None
-                        detected_player = fixed_player
-                        manual_sequence = None
-                        initial_storage_sequence = None
-                        pending_expected_sequence = None
-                        pending_base_sequence = None
-                        pending_col = None
-                        pending_retry_attempted = False
-                        pending_move_started_at = None
-                        blocked_sequence = None
-                        blocked_sequence_until = 0.0
-                        grid_seq_candidate = None
-                        grid_seq_candidate_count = 0
-                        inferred_move_candidate = None
-                        inferred_move_candidate_count = 0
-                        last_grid_col_counts = None
-                        tracked_grid_sequence = None
-                        last_suggested_col = None
-                        last_suggested_at = 0.0
-                        empty_grid_streak = 0
-                        last_solved_sequence = None
-                        last_solved_col = None
-                        last_logged_suggestion_seq = None
-                        last_logged_suggestion_col = None
-                        auto_side_probe_started_at = None
+                        reset_runtime_for_next_match(
+                            seeking_new_match_value=True,
+                            post_game_waiting_empty_value=False,
+                        )
 
                     ui_state = read_post_game_ui_state(page)
                     if ui_state is None:
@@ -1643,34 +1861,7 @@ def main() -> int:
                                 last_lifecycle_log = now
 
                     if acted:
-                        match_active = False
-                        post_game_mode = False
-                        post_game_started_at = None
-                        last_sequence = None
-                        detected_player = fixed_player
-                        manual_sequence = None
-                        initial_storage_sequence = None
-                        pending_expected_sequence = None
-                        pending_base_sequence = None
-                        pending_col = None
-                        pending_retry_attempted = False
-                        pending_move_started_at = None
-                        blocked_sequence = None
-                        blocked_sequence_until = 0.0
-                        grid_seq_candidate = None
-                        grid_seq_candidate_count = 0
-                        inferred_move_candidate = None
-                        inferred_move_candidate_count = 0
-                        last_grid_col_counts = None
-                        tracked_grid_sequence = None
-                        last_suggested_col = None
-                        last_suggested_at = 0.0
-                        empty_grid_streak = 0
-                        last_solved_sequence = None
-                        last_solved_col = None
-                        last_logged_suggestion_seq = None
-                        last_logged_suggestion_col = None
-                        auto_side_probe_started_at = None
+                        reset_runtime_for_next_match()
                     else:
                         if args.post_game_reload_sec > 0 and post_game_elapsed >= args.post_game_reload_sec:
                             post_game_reload_fallback("controls did not appear")
@@ -1684,20 +1875,24 @@ def main() -> int:
                     continue
 
                 if args.mode == "auto" and site_mode == "papergames" and seeking_new_match:
-                    now = time.time()
-                    if now - last_queue_click_attempt_at >= QUEUE_CLICK_RETRY_GAP_SEC:
-                        last_queue_click_attempt_at = now
-                        if try_click_queue_controls(page):
-                            print("[bridge] Queue click sent (play online/random player)")
-                            queued_click_at = time.time()
-                            # Exit queue-click loop and wait for match attach.
-                            seeking_new_match = False
+                    if is_papergames_live_room_url(page.url):
+                        # Match URL reached; leave queue-click flow and attach normally.
+                        seeking_new_match = False
                     else:
-                        if now - last_lifecycle_log >= 5.0:
-                            print("[bridge] Waiting for 'Play online with a random player' button...")
-                            last_lifecycle_log = now
-                    time.sleep(args.poll_ms / 1000.0)
-                    continue
+                        now = time.time()
+                        if now - last_queue_click_attempt_at >= QUEUE_CLICK_RETRY_GAP_SEC:
+                            last_queue_click_attempt_at = now
+                            if try_click_queue_controls(page):
+                                print("[bridge] Queue click sent (play online/random player)")
+                                queued_click_at = time.time()
+                                # Exit queue-click loop and wait for match attach.
+                                seeking_new_match = False
+                        else:
+                            if now - last_lifecycle_log >= 5.0:
+                                print("[bridge] Waiting for 'Play online with a random player' button...")
+                                last_lifecycle_log = now
+                        time.sleep(args.poll_ms / 1000.0)
+                        continue
 
                 if not match_active:
                     # Stay idle on the landing/lobby page until a match is entered.
@@ -1735,6 +1930,52 @@ def main() -> int:
                     # consider the match active.
                     board_signal_ready = probe_seq is not None
 
+                    if site_mode == "papergames" and not is_papergames_live_room_url(page.url):
+                        now = time.time()
+                        # Some papergames transitions briefly keep non-/r/ URLs even
+                        # though the in-game board is already active. Allow attach only
+                        # when we have strong signals after a queue click.
+                        can_attach_without_live_room = False
+                        if args.mode == "auto" and queued_click_at is not None:
+                            elapsed = now - queued_click_at
+                            if elapsed >= QUEUE_ATTACH_SIGNAL_GRACE_SEC:
+                                if has_in_game_ui(page):
+                                    has_board_moves = isinstance(probe_seq, str) and len(probe_seq) > 0
+                                    has_turn_banner = has_initial_your_turn_text(page)
+                                    can_attach_without_live_room = has_board_moves or has_turn_banner
+                                    if can_attach_without_live_room:
+                                        print(
+                                            "[bridge] In-game board detected on non-live URL; "
+                                            "attaching without /en/r/..."
+                                        )
+
+                        if can_attach_without_live_room:
+                            pass
+                        elif (
+                            args.mode == "auto"
+                            and queued_click_at is not None
+                            and (now - queued_click_at) >= QUEUE_RETRY_IDLE_SEC
+                        ):
+                            elapsed = now - queued_click_at
+                            print(
+                                "[bridge] Queue still not in live room URL "
+                                f"after {elapsed:.1f}s; retrying queue"
+                            )
+                            seeking_new_match = True
+                            queued_click_at = None
+                            time.sleep(args.poll_ms / 1000.0)
+                            continue
+                        else:
+                            if now - last_wait_log >= 5.0:
+                                current_path = urlparse(page.url).path or "/"
+                                print(
+                                    "[bridge] Waiting for live match room URL (/en/r/...)... "
+                                    f"(current={current_path})"
+                                )
+                                last_wait_log = now
+                            time.sleep(args.poll_ms / 1000.0)
+                            continue
+
                     if in_lobby_url(page.url, args.url) and not has_in_game_ui(page) and not board_signal_ready:
                         now = time.time()
                         if (
@@ -1743,7 +1984,11 @@ def main() -> int:
                             and queued_click_at is not None
                             and (now - queued_click_at) >= QUEUE_RETRY_IDLE_SEC
                         ):
-                            print("[bridge] Lobby still idle after queue click; retrying queue")
+                            elapsed = now - queued_click_at
+                            print(
+                                "[bridge] Lobby still idle after queue click "
+                                f"({elapsed:.1f}s); retrying queue"
+                            )
                             seeking_new_match = True
                             queued_click_at = None
                             time.sleep(args.poll_ms / 1000.0)
@@ -1756,10 +2001,25 @@ def main() -> int:
 
                     match_active = True
                     queued_click_at = None
+                    current_opponent = None
+                    game_result_recorded = False
+                    game_solve_total_sec = 0.0
+                    game_solve_samples = 0
                     print(f"[bridge] Match detected at URL: {page.url}")
                     if probe_source == "storage" and probe_seq is not None:
                         initial_storage_sequence = probe_seq
                         print(f"[bridge] Captured initial storage sequence baseline: {initial_storage_sequence}")
+
+                if match_active and current_opponent is None and site_mode == "papergames":
+                    parsed_opp = read_opponent_username_strict(page, our_username=our_username)
+                    if parsed_opp is not None:
+                        current_opponent = parsed_opp
+                        print(f"[bridge] Opponent detected: {current_opponent}")
+                    else:
+                        probe_fallback = debug_log_opponent_probe()
+                        if probe_fallback is not None:
+                            current_opponent = probe_fallback
+                            print(f"[bridge] Opponent detected (fallback): {current_opponent}")
 
                 if is_replay_page(page):
                     now = time.time()
@@ -1777,6 +2037,22 @@ def main() -> int:
                     reason = detect_terminal_page_reason(page)
                     if reason is not None:
                         print(f"[bridge] Terminal page state detected: {reason}")
+                        if not game_result_recorded:
+                            mapped = result_from_terminal_reason(reason, detected_player)
+                            if mapped is not None:
+                                stats.record_game(
+                                    mapped,
+                                    detected_player,
+                                    current_opponent,
+                                    len(last_sequence or ""),
+                                    game_solve_samples,
+                                    game_solve_total_sec,
+                                )
+                                game_result_recorded = True
+                                print(f"[bridge] Stats updated: {stats.summary_line()}")
+                        if on_game_resolved_maybe_pause():
+                            time.sleep(args.poll_ms / 1000.0)
+                            continue
                         post_game_mode = True
                         post_game_started_at = time.time()
                         time.sleep(args.poll_ms / 1000.0)
@@ -1827,9 +2103,36 @@ def main() -> int:
                                 ):
                                     last_grid_col_counts = grid_counts
                                     tracked_grid_sequence = ""
+                                elif (
+                                    tracked_grid_sequence is None
+                                    and isinstance(seq, str)
+                                    and VALID_SEQ_RE.fullmatch(seq)
+                                ):
+                                    # Rebase when we have a coherent fresh grid parse but
+                                    # previous baseline belongs to an older terminal board.
+                                    last_grid_col_counts = grid_counts
+                                    tracked_grid_sequence = seq
+                                    debug_log_parse_snapshot(
+                                        "grid_negative_delta_rebased_from_grid",
+                                        {
+                                            "last_grid_col_counts": last_grid_col_counts,
+                                            "grid_counts": grid_counts,
+                                            "tracked_grid_sequence": tracked_grid_sequence,
+                                            "seq_source": seq_source,
+                                        },
+                                    )
                                 else:
                                     # Ignore this unstable frame; keep prior tracker.
-                                    pass
+                                    debug_log_parse_snapshot(
+                                        "grid_negative_delta_ignored",
+                                        {
+                                            "last_grid_col_counts": last_grid_col_counts,
+                                            "grid_counts": grid_counts,
+                                            "tracked_grid_sequence": tracked_grid_sequence,
+                                            "empty_grid_streak": empty_grid_streak,
+                                            "post_game_waiting_empty": post_game_waiting_empty,
+                                        },
+                                    )
                             else:
                                 added = sum(deltas)
                                 if added == 1 and deltas.count(1) == 1:
@@ -1877,7 +2180,16 @@ def main() -> int:
                                     pass
                                 else:
                                     # Ignore unstable multi-cell jumps for one tick.
-                                    pass
+                                    debug_log_parse_snapshot(
+                                        "grid_multi_cell_jump_ignored",
+                                        {
+                                            "deltas": deltas,
+                                            "added": added,
+                                            "last_grid_col_counts": last_grid_col_counts,
+                                            "grid_counts": grid_counts,
+                                            "tracked_grid_sequence": tracked_grid_sequence,
+                                        },
+                                    )
 
                         if tracked_grid_sequence is not None:
                             seq = tracked_grid_sequence
@@ -1899,6 +2211,22 @@ def main() -> int:
                         reason = detect_terminal_page_reason(page)
                         if reason is not None:
                             print(f"[bridge] Terminal/no-sequence state detected: {reason}")
+                            if not game_result_recorded:
+                                mapped = result_from_terminal_reason(reason, detected_player)
+                                if mapped is not None:
+                                    stats.record_game(
+                                        mapped,
+                                        detected_player,
+                                        current_opponent,
+                                        len(last_sequence or ""),
+                                        game_solve_samples,
+                                        game_solve_total_sec,
+                                    )
+                                    game_result_recorded = True
+                                    print(f"[bridge] Stats updated: {stats.summary_line()}")
+                            if on_game_resolved_maybe_pause():
+                                time.sleep(args.poll_ms / 1000.0)
+                                continue
                             post_game_mode = True
                             post_game_started_at = time.time()
                             time.sleep(args.poll_ms / 1000.0)
@@ -1918,33 +2246,7 @@ def main() -> int:
 
                         if in_lobby_url(page.url, args.url) and not has_in_game_ui(page):
                             print("[bridge] No sequence and lobby detected; recovering to queue flow")
-                            match_active = False
-                            seeking_new_match = True
-                            last_sequence = None
-                            detected_player = fixed_player
-                            manual_sequence = None
-                            initial_storage_sequence = None
-                            pending_expected_sequence = None
-                            pending_base_sequence = None
-                            pending_col = None
-                            pending_retry_attempted = False
-                            pending_move_started_at = None
-                            blocked_sequence = None
-                            blocked_sequence_until = 0.0
-                            grid_seq_candidate = None
-                            grid_seq_candidate_count = 0
-                            inferred_move_candidate = None
-                            inferred_move_candidate_count = 0
-                            last_grid_col_counts = None
-                            tracked_grid_sequence = None
-                            last_suggested_col = None
-                            last_suggested_at = 0.0
-                            empty_grid_streak = 0
-                            last_solved_sequence = None
-                            last_solved_col = None
-                            last_logged_suggestion_seq = None
-                            last_logged_suggestion_col = None
-                            auto_side_probe_started_at = None
+                            reset_runtime_for_next_match(seeking_new_match_value=True)
                             queued_click_at = None
                             time.sleep(args.poll_ms / 1000.0)
                             continue
@@ -1953,6 +2255,16 @@ def main() -> int:
                     if now - last_wait_log >= 5.0:
                         print("[bridge] Waiting for detectable sequence...")
                         last_wait_log = now
+                    debug_log_parse_snapshot(
+                        "sequence_missing",
+                        {
+                            "last_sequence": last_sequence,
+                            "tracked_grid_sequence": tracked_grid_sequence,
+                            "detected_player": detected_player,
+                            "post_game_mode": post_game_mode,
+                        },
+                        min_interval_sec=5.0,
+                    )
                     time.sleep(args.poll_ms / 1000.0)
                     continue
 
@@ -1970,6 +2282,15 @@ def main() -> int:
                             if now - last_non_monotonic_log >= 5.0:
                                 print("[bridge] Ignoring unstable multi-move papergames snapshot")
                                 last_non_monotonic_log = now
+                            debug_log_parse_snapshot(
+                                "papergames_multi_move_snapshot_ignored",
+                                {
+                                    "last_sequence": last_sequence,
+                                    "candidate_sequence": seq,
+                                    "seq_source": seq_source,
+                                },
+                                min_interval_sec=5.0,
+                            )
                             time.sleep(args.poll_ms / 1000.0)
                             continue
                     else:
@@ -1989,6 +2310,15 @@ def main() -> int:
                             if now - last_non_monotonic_log >= 5.0:
                                 print("[bridge] Ignoring non-monotonic papergames snapshot")
                                 last_non_monotonic_log = now
+                            debug_log_parse_snapshot(
+                                "papergames_non_monotonic_snapshot_ignored",
+                                {
+                                    "last_sequence": last_sequence,
+                                    "candidate_sequence": seq,
+                                    "seq_source": seq_source,
+                                },
+                                min_interval_sec=5.0,
+                            )
                             time.sleep(args.poll_ms / 1000.0)
                             continue
 
@@ -2022,6 +2352,15 @@ def main() -> int:
                     if now - last_non_monotonic_log >= 5.0:
                         print("[bridge] Ignoring multi-move grid jump; waiting for single committed move")
                         last_non_monotonic_log = now
+                    debug_log_parse_snapshot(
+                        "grid_multi_move_jump_ignored",
+                        {
+                            "last_sequence": last_sequence,
+                            "candidate_sequence": seq,
+                            "seq_source": seq_source,
+                        },
+                        min_interval_sec=5.0,
+                    )
                     time.sleep(args.poll_ms / 1000.0)
                     continue
 
@@ -2057,6 +2396,15 @@ def main() -> int:
                                 "[bridge] Ignoring non-monotonic grid sequence; waiting for stable extension"
                             )
                             last_non_monotonic_log = now
+                        debug_log_parse_snapshot(
+                            "grid_non_monotonic_sequence_ignored",
+                            {
+                                "last_sequence": last_sequence,
+                                "candidate_sequence": seq,
+                                "seq_source": seq_source,
+                            },
+                            min_interval_sec=5.0,
+                        )
                         time.sleep(args.poll_ms / 1000.0)
                         continue
 
@@ -2110,6 +2458,15 @@ def main() -> int:
                     if now - last_terminal_log >= 3.0:
                         print("[bridge] Ignoring invalid sequence snapshot")
                         last_terminal_log = now
+                    debug_log_parse_snapshot(
+                        "solver_invalid_sequence_snapshot",
+                        {
+                            "sequence": seq,
+                            "seq_source": seq_source,
+                            "last_sequence": last_sequence,
+                        },
+                        min_interval_sec=3.0,
+                    )
 
                     if site_mode == "papergames":
                         # Rebase delta trackers to recover from occasional stale/garbled frames.
@@ -2123,45 +2480,45 @@ def main() -> int:
                     continue
 
                 if seq_status in {"win1", "win2", "draw"}:
-                    outcome = {
-                        "win1": "Player 1 win",
-                        "win2": "Player 2 win",
-                        "draw": "Draw",
-                    }[seq_status]
+                    if seq_status == "draw":
+                        outcome = "Draw"
+                    else:
+                        winner_side = 1 if seq_status == "win1" else 2
+                        winner_name: Optional[str] = None
+                        if detected_player in {1, 2}:
+                            if winner_side == detected_player:
+                                winner_name = our_username or "You"
+                            else:
+                                winner_name = current_opponent
+                        if not winner_name:
+                            winner_name = f"Player {winner_side}"
+                        outcome = f"{winner_name} win"
                     print(f"[bridge] Game finished: {outcome}")
+
+                    if not game_result_recorded:
+                        mapped = result_from_seq_status(seq_status, detected_player)
+                        if mapped is not None:
+                            stats.record_game(
+                                mapped,
+                                detected_player,
+                                current_opponent,
+                                len(seq),
+                                game_solve_samples,
+                                game_solve_total_sec,
+                            )
+                            game_result_recorded = True
+                            print(f"[bridge] Stats updated: {stats.summary_line()}")
+
+                    if on_game_resolved_maybe_pause():
+                        time.sleep(args.poll_ms / 1000.0)
+                        continue
 
                     if args.mode == "auto" and site_mode == "papergames":
                         post_game_mode = True
                         post_game_started_at = time.time()
                     else:
                         print("[bridge] Resetting state for next game")
-                        match_active = False
-                        post_game_waiting_empty = True
-                        last_sequence = None
-                        detected_player = fixed_player
-                        manual_sequence = None
-                        initial_storage_sequence = None
-                        pending_expected_sequence = None
-                        pending_base_sequence = None
-                        pending_col = None
-                        pending_retry_attempted = False
-                        pending_move_started_at = None
-                        blocked_sequence = None
-                        blocked_sequence_until = 0.0
-                        grid_seq_candidate = None
-                        grid_seq_candidate_count = 0
-                        inferred_move_candidate = None
-                        inferred_move_candidate_count = 0
-                        last_grid_col_counts = None
-                        tracked_grid_sequence = None
-                        last_suggested_col = None
-                        last_suggested_at = 0.0
-                        empty_grid_streak = 0
-                        last_solved_sequence = None
-                        last_solved_col = None
-                        last_logged_suggestion_seq = None
-                        last_logged_suggestion_col = None
-                        auto_side_probe_started_at = None
+                        reset_runtime_for_next_match(post_game_waiting_empty_value=True)
                     time.sleep(args.poll_ms / 1000.0)
                     continue
 
@@ -2180,6 +2537,17 @@ def main() -> int:
 
                 # After an auto-click, wait until board state advances before making a new decision.
                 if pending_expected_sequence is not None:
+                    if args.mode == "auto" and site_mode == "papergames":
+                        reason = detect_terminal_page_reason(page)
+                        if reason is not None:
+                            if handle_terminal_transition(
+                                reason,
+                                "Terminal state detected while awaiting pending move",
+                                sequence_len_hint=len(seq),
+                            ):
+                                time.sleep(args.poll_ms / 1000.0)
+                                continue
+
                     expected_confirmed = seq == pending_expected_sequence
                     if (
                         not expected_confirmed
@@ -2334,6 +2702,9 @@ def main() -> int:
                         time.sleep(args.poll_ms / 1000.0)
                         continue
 
+                    game_solve_total_sec += solve_elapsed
+                    game_solve_samples += 1
+
                     if solve_elapsed > SLOW_SOLVE_THRESHOLD_SEC and seq not in slow_logged_sequences:
                         record_slow_solve(seq, solve_elapsed, args.weak)
                         slow_logged_sequences.add(seq)
@@ -2375,6 +2746,15 @@ def main() -> int:
                                 "[bridge] Discarding solved move: board changed during solve "
                                 f"({seq} -> {latest_seq})"
                             )
+                            debug_log_parse_snapshot(
+                                "discard_solved_move_board_changed",
+                                {
+                                    "solved_sequence": seq,
+                                    "latest_sequence": latest_seq,
+                                    "solve_elapsed_sec": round(solve_elapsed, 4),
+                                },
+                                min_interval_sec=2.0,
+                            )
                             time.sleep(args.poll_ms / 1000.0)
                             continue
 
@@ -2383,6 +2763,17 @@ def main() -> int:
                         continue
                     last_solved_sequence = seq
                     last_solved_col = int(move_col_raw)
+
+                    if args.mode == "auto" and site_mode == "papergames":
+                        reason = detect_terminal_page_reason(page)
+                        if reason is not None:
+                            if handle_terminal_transition(
+                                reason,
+                                "Terminal state detected after solve",
+                                sequence_len_hint=len(seq),
+                            ):
+                                time.sleep(args.poll_ms / 1000.0)
+                                continue
 
                 if move_col_raw is None:
                     time.sleep(args.poll_ms / 1000.0)
@@ -2432,6 +2823,7 @@ def main() -> int:
 
     except KeyboardInterrupt:
         print("\n[bridge] Stopped by user")
+        print(f"[bridge] Final stats: {stats.summary_line()}")
     except PlaywrightTimeoutError as exc:
         print(f"[bridge] Browser timeout: {exc}")
         return 1
@@ -2439,6 +2831,7 @@ def main() -> int:
         print(f"[bridge] Browser error: {exc}")
         return 1
     finally:
+        operator_console_stop.set()
         solver.close()
 
     return 0
