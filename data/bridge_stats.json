@@ -2,15 +2,15 @@
   "by_side": {
     "1": {
       "draws": 0,
-      "games": 61,
+      "games": 67,
       "losses": 1,
-      "wins": 60
+      "wins": 66
     },
     "2": {
       "draws": 0,
-      "games": 43,
-      "losses": 4,
-      "wins": 39
+      "games": 48,
+      "losses": 5,
+      "wins": 43
     }
   },
   "opponents": {
@@ -208,6 +208,34 @@
       },
       "solve_samples": 9,
       "solve_total_sec": 2.967241048812866,
+      "wins": 1
+    },
+    "DAHANDMAN": {
+      "avg_solve_sec": 0.1363254955836705,
+      "draws": 0,
+      "games": 1,
+      "last_seen": "2026-03-15 12:26:25",
+      "losses": 0,
+      "our_side_counts": {
+        "1": 0,
+        "2": 1
+      },
+      "solve_samples": 7,
+      "solve_total_sec": 0.9542784690856934,
+      "wins": 1
+    },
+    "Day": {
+      "avg_solve_sec": 0.06466408967971801,
+      "draws": 0,
+      "games": 1,
+      "last_seen": "2026-03-15 12:32:04",
+      "losses": 0,
+      "our_side_counts": {
+        "1": 0,
+        "2": 1
+      },
+      "solve_samples": 20,
+      "solve_total_sec": 1.2932817935943604,
       "wins": 1
     },
     "Del": {
@@ -602,6 +630,20 @@
       "solve_total_sec": 1.1433005332946777,
       "wins": 1
     },
+    "Marvelous": {
+      "avg_solve_sec": 0.14975680623735702,
+      "draws": 0,
+      "games": 1,
+      "last_seen": "2026-03-15 12:27:59",
+      "losses": 0,
+      "our_side_counts": {
+        "1": 1,
+        "2": 0
+      },
+      "solve_samples": 14,
+      "solve_total_sec": 2.096595287322998,
+      "wins": 1
+    },
     "Merv": {
       "avg_solve_sec": 0.22060031361050075,
       "draws": 0,
@@ -684,6 +726,20 @@
       },
       "solve_samples": 15,
       "solve_total_sec": 0.5933773517608643,
+      "wins": 1
+    },
+    "Paul Sweeting": {
+      "avg_solve_sec": 0.1857372760772705,
+      "draws": 0,
+      "games": 1,
+      "last_seen": "2026-03-15 12:02:31",
+      "losses": 0,
+      "our_side_counts": {
+        "1": 1,
+        "2": 0
+      },
+      "solve_samples": 10,
+      "solve_total_sec": 1.857372760772705,
       "wins": 1
     },
     "Pete": {
@@ -896,6 +952,20 @@
       "solve_total_sec": 10.565693140029907,
       "wins": 1
     },
+    "Yodofjtidoe": {
+      "avg_solve_sec": 0.2771024053747004,
+      "draws": 0,
+      "games": 1,
+      "last_seen": "2026-03-15 12:29:04",
+      "losses": 0,
+      "our_side_counts": {
+        "1": 0,
+        "2": 1
+      },
+      "solve_samples": 11,
+      "solve_total_sec": 3.048126459121704,
+      "wins": 1
+    },
     "Yoh": {
       "avg_solve_sec": 0.1778441992673007,
       "draws": 0,
@@ -1106,6 +1176,20 @@
       "solve_total_sec": 9.15185809135437,
       "wins": 1
     },
+    "helia": {
+      "avg_solve_sec": 0.30641361383291393,
+      "draws": 0,
+      "games": 1,
+      "last_seen": "2026-03-15 12:33:08",
+      "losses": 0,
+      "our_side_counts": {
+        "1": 1,
+        "2": 0
+      },
+      "solve_samples": 13,
+      "solve_total_sec": 3.983376979827881,
+      "wins": 1
+    },
     "jacj": {
       "avg_solve_sec": 0.073609193166097,
       "draws": 0,
@@ -1232,6 +1316,20 @@
       "solve_total_sec": 7.845365047454834,
       "wins": 1
     },
+    "sofi": {
+      "avg_solve_sec": 0.25836092233657837,
+      "draws": 0,
+      "games": 1,
+      "last_seen": "2026-03-15 12:24:40",
+      "losses": 0,
+      "our_side_counts": {
+        "1": 1,
+        "2": 0
+      },
+      "solve_samples": 8,
+      "solve_total_sec": 2.066887378692627,
+      "wins": 1
+    },
     "straight man": {
       "avg_solve_sec": 1.992873881992541,
       "draws": 0,
@@ -1244,6 +1342,20 @@
       },
       "solve_samples": 19,
       "solve_total_sec": 37.864603757858276,
+      "wins": 1
+    },
+    "testiq": {
+      "avg_solve_sec": 0.10999100208282471,
+      "draws": 0,
+      "games": 1,
+      "last_seen": "2026-03-15 12:23:33",
+      "losses": 0,
+      "our_side_counts": {
+        "1": 1,
+        "2": 0
+      },
+      "solve_samples": 10,
+      "solve_total_sec": 1.099910020828247,
       "wins": 1
     },
     "who it": {
@@ -1263,10 +1375,10 @@
   },
   "totals": {
     "draws": 0,
-    "games": 104,
-    "losses": 5,
-    "wins": 99
+    "games": 115,
+    "losses": 6,
+    "wins": 109
   },
-  "updated_at": "2026-03-15 11:50:59",
+  "updated_at": "2026-03-15 12:33:08",
   "version": 1
 }
