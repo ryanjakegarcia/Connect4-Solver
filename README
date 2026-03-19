@@ -74,6 +74,8 @@ Auto-mode runtime commands (type into the same terminal and press Enter):
 - `resume`: resume auto actions
 - `status`: print current control state (`running|draining|paused`)
 - `wait <sec>`: change terminal post-game wait timer live while bridge is running
+- `emote [code]`: send an emote now (`code` defaults to `--win-emote-code`, supports aliases like `scream`, e.g. `emote scream` or `emote 1f631`)
+- `emote help`: show emote aliases and corresponding hex codes
 - `quit`: exit bridge cleanly
 
 Operator prompt UX:
@@ -84,6 +86,8 @@ Key options:
 - `--player 1|2|auto`: choose your side (or prompt at runtime with `auto`)
 - `--weak`: use weak solver mode (`./solver -w`)
 - `--auto-rematch`: in auto mode, click Rematch after terminal state when available (default behavior is leave room)
+- `--auto-emote-on-win`: in auto papergames mode, send an emote after wins
+- `--win-emote-code VALUE`: emoji value to click on win (hex or alias; default `1f60e` / `sunglasses`). Aliases: `scream`, `sunglasses`, `smirk`, `cry`, `sob`, `wave`, `thumbsup`, `wink`, `tongue`, `sleep`, `zipper`, `grin`
 - `--post-game-wait-sec N`: in auto papergames mode, wait `N` seconds on terminal page before leave/rematch actions (default `5`)
 - `--auto-max-runtime-sec N`: in auto mode, after `N` seconds request drain, then quit automatically once current game resolves (`0` disables, default). Hard safety cutoff is `2N` seconds and force-quits even mid-match.
 - `--post-game-reload-sec N`: in auto papergames mode, reload lobby if post-game controls do not appear within `N` seconds (`0` disables, default)
@@ -92,7 +96,6 @@ Key options:
 - `--stats-reset`: clear existing bridge stats files at startup
 - `--our-username NAME`: exclude your own username from strict opponent capture (rank suffixes like `"name 7850"` are normalized)
 - `--manual-fallback --manual-input-mode incremental|full`: fallback input when board parsing fails
-- `--block-ads --block-level conservative|aggressive`: optional request blocking
 - `--config ui/browser_targets.papergames.json`: custom board selector config
 
 Current papergames behavior:
@@ -139,21 +142,23 @@ Recommended auto-mode command:
   --post-game-reload-sec 0
 ```
 
-Chromium extension mode (optional):
+## Linux App Icon / Launcher
+
+This repo includes a desktop launcher and icon for Bridge:
+
+- `ui/Connect4-Bridge.desktop`
+- `ui/launch_bridge.sh`
+- `ui/assets/bridge-icon.svg`
+
+Install the launcher into your app menu/dock:
 
 ```bash
-.venv/bin/python ui/browser_bridge.py \
-  --browser chromium \
-  --extension-dir /absolute/path/to/unpacked/extension \
-  --user-data-dir .pw-user-data \
-  --url https://papergames.io/en/connect4 \
-  --mode assist
+mkdir -p ~/.local/share/applications
+cp ui/Connect4-Bridge.desktop ~/.local/share/applications/
+update-desktop-database ~/.local/share/applications 2>/dev/null || true
 ```
 
-Extension notes:
-- Extension mode is Chromium-only.
-- `--extension-dir` requires headed mode.
-- `--user-data-dir` persists extension/profile state.
+After this, search for `Connect4 Bridge` in your desktop launcher.
 
 ## Build and Run (CLI)
 

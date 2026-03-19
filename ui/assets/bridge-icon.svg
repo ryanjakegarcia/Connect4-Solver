@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Connect4 Bridge icon">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0e3a66"/>
+      <stop offset="100%" stop-color="#0b5f8a"/>
+    </linearGradient>
+    <linearGradient id="chipY" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffe06a"/>
+      <stop offset="100%" stop-color="#f5b400"/>
+    </linearGradient>
+    <linearGradient id="chipR" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ff8f80"/>
+      <stop offset="100%" stop-color="#d73a2f"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="8" y="8" width="240" height="240" rx="44" fill="url(#bg)"/>
+  <rect x="38" y="54" width="180" height="148" rx="18" fill="#f3f7fb" opacity="0.95"/>
+
+  <circle cx="72" cy="88" r="16" fill="url(#chipR)"/>
+  <circle cx="112" cy="88" r="16" fill="url(#chipY)"/>
+  <circle cx="152" cy="88" r="16" fill="url(#chipR)"/>
+  <circle cx="192" cy="88" r="16" fill="url(#chipY)"/>
+
+  <circle cx="72" cy="128" r="16" fill="url(#chipY)"/>
+  <circle cx="112" cy="128" r="16" fill="url(#chipR)"/>
+  <circle cx="152" cy="128" r="16" fill="url(#chipY)"/>
+  <circle cx="192" cy="128" r="16" fill="url(#chipR)"/>
+
+  <circle cx="72" cy="168" r="16" fill="url(#chipR)"/>
+  <circle cx="112" cy="168" r="16" fill="url(#chipY)"/>
+  <circle cx="152" cy="168" r="16" fill="url(#chipR)"/>
+  <circle cx="192" cy="168" r="16" fill="url(#chipY)"/>
+
+  <path d="M78 215h100" stroke="#9ad9ff" stroke-width="10" stroke-linecap="round"/>
+  <path d="M173 201l20 14-20 14" fill="none" stroke="#9ad9ff" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

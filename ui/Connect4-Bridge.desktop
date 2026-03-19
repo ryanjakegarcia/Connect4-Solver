@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Connect4 Bridge
+Comment=Launch the papergames Connect4 bridge bot
+Exec=/home/fenari/CPSC481/Project/Connect4-Bot/ui/launch_bridge.sh
+Icon=/home/fenari/CPSC481/Project/Connect4-Bot/ui/assets/bridge-icon.svg
+Terminal=true
+Categories=Game;
+StartupNotify=true
