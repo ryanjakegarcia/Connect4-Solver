@@ -75,6 +75,8 @@ class BridgeStats:
         sequence_len: int,
         solve_samples: int,
         solve_total_sec: float,
+        opponent_move_samples: int,
+        opponent_move_total_sec: float,
     ) -> None:
         if result not in {"win", "loss", "draw"}:
             return
@@ -102,6 +104,9 @@ class BridgeStats:
                     "solve_samples": 0,
                     "solve_total_sec": 0.0,
                     "avg_solve_sec": 0.0,
+                    "opponent_move_samples": 0,
+                    "opponent_move_total_sec": 0.0,
+                    "avg_opponent_move_sec": 0.0,
                 }
                 opps[opponent] = entry
 
@@ -116,9 +121,67 @@ class BridgeStats:
             samples = max(1, int(entry["solve_samples"]))
             entry["avg_solve_sec"] = float(entry["solve_total_sec"]) / float(samples)
 
+            entry["opponent_move_samples"] = int(entry.get("opponent_move_samples", 0)) + opponent_move_samples
+            entry["opponent_move_total_sec"] = float(
+                entry.get("opponent_move_total_sec", 0.0)
+            ) + opponent_move_total_sec
+            opp_samples = max(1, int(entry["opponent_move_samples"]))
+            entry["avg_opponent_move_sec"] = float(entry["opponent_move_total_sec"]) / float(opp_samples)
+
         self.data["updated_at"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        self._append_csv(result, our_side, opponent, sequence_len, solve_samples, solve_total_sec)
+        self._append_csv(
+            result,
+            our_side,
+            opponent,
+            sequence_len,
+            solve_samples,
+            solve_total_sec,
+            opponent_move_samples,
+            opponent_move_total_sec,
+        )
         self.save()
+
+    def _ensure_csv_header(self) -> None:
+        header = [
+            "timestamp",
+            "result",
+            "our_side",
+            "opponent",
+            "sequence_len",
+            "solve_samples",
+            "solve_total_sec",
+            "opponent_move_samples",
+            "opponent_move_total_sec",
+        ]
+        if not os.path.exists(self.csv_path):
+            return
+
+        try:
+            with open(self.csv_path, "r", encoding="utf-8", newline="") as f:
+                rows = list(csv.reader(f))
+        except Exception:
+            return
+
+        if not rows:
+            return
+
+        current_header = rows[0]
+        if current_header == header:
+            return
+
+        if current_header == header[:7]:
+            try:
+                with open(self.csv_path, "w", encoding="utf-8", newline="") as f:
+                    w = csv.writer(f)
+                    w.writerow(header)
+                    for row in rows[1:]:
+                        padded = list(row[:7])
+                        while len(padded) < 7:
+                            padded.append("")
+                        padded.extend(["", ""])
+                        w.writerow(padded)
+            except Exception:
+                pass
 
     def _append_csv(
         self,
@@ -128,10 +191,13 @@ class BridgeStats:
         sequence_len: int,
         solve_samples: int,
         solve_total_sec: float,
+        opponent_move_samples: int,
+        opponent_move_total_sec: float,
     ) -> None:
         try:
             os.makedirs(os.path.dirname(self.csv_path), exist_ok=True)
             exists = os.path.exists(self.csv_path)
+            self._ensure_csv_header()
             with open(self.csv_path, "a", encoding="utf-8", newline="") as f:
                 w = csv.writer(f)
                 if not exists:
@@ -143,6 +209,8 @@ class BridgeStats:
                         "sequence_len",
                         "solve_samples",
                         "solve_total_sec",
+                        "opponent_move_samples",
+                        "opponent_move_total_sec",
                     ])
                 w.writerow(
                     [
@@ -153,6 +221,8 @@ class BridgeStats:
                         sequence_len,
                         solve_samples,
                         f"{solve_total_sec:.3f}",
+                        opponent_move_samples,
+                        f"{opponent_move_total_sec:.3f}",
                     ]
                 )
         except Exception:
@@ -192,8 +262,6 @@ def result_from_seq_status(seq_status: str, our_side: Optional[int]) -> Optional
 
 
 def result_from_terminal_reason(reason: str, our_side: Optional[int]) -> Optional[str]:
-    if our_side not in {1, 2}:
-        return None
     r = reason.lower()
     if "draw" in r:
         return "draw"
@@ -201,8 +269,21 @@ def result_from_terminal_reason(reason: str, our_side: Optional[int]) -> Optiona
         return "win"
     if "you lost" in r:
         return "loss"
+    if "you resigned" in r or "you surrendered" in r:
+        return "loss"
+    if "opponent resigned" in r or "opponent surrendered" in r:
+        return "win"
     if "timed out" in r or "timeout" in r:
         return "loss"
-    if "opponent left" in r or "opponent disconnected" in r:
+    if (
+        "opponent left" in r
+        or "opponent disconnected" in r
+        or "opponent aborted" in r
+        or "surrendered" in r
+        or "resigned" in r
+        or "disconnected" in r
+        or "canceled" in r
+        or "cancelled" in r
+    ):
         return "win"
     return None

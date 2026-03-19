@@ -223,31 +223,182 @@ def has_initial_your_turn_text(page) -> bool:
         return False
 
 
+def read_site_wld_record(page) -> Optional[dict]:
+        """Best-effort parse of website-visible W-L-D counters."""
+        try:
+                dom_wld = page.evaluate(r"""
+                        () => {
+                            const asInt = (el) => {
+                                if (!el) return null;
+                                const txt = (el.textContent || '').trim();
+                                return /^\d+$/.test(txt) ? parseInt(txt, 10) : null;
+                            };
+
+                            // Prefer the row containing the tooltip icon: "Wins / Losses / Draws".
+                            const icon = document.querySelector('fa-icon[mattooltip*="Wins"], fa-icon[mattooltip*="wins"]');
+                            const container = icon ? icon.closest('div') : null;
+                            if (container) {
+                                const winEl = container.querySelector('span.text-success');
+                                const lossEl = container.querySelector('span.text-danger');
+                                const allNums = Array.from(container.querySelectorAll('span.mat-mdc-tooltip-trigger'));
+                                const win = asInt(winEl);
+                                const loss = asInt(lossEl);
+                                const fallbackNums = allNums.map(asInt).filter((v) => Number.isInteger(v));
+                                const drawsFromTail = fallbackNums.length >= 3 ? fallbackNums[2] : null;
+                                const draw = Number.isInteger(drawsFromTail) ? drawsFromTail : null;
+                                if (Number.isInteger(win) && Number.isInteger(loss) && Number.isInteger(draw)) {
+                                    return { wins: win, losses: loss, draws: draw, source: 'dom-tooltip-row' };
+                                }
+                            }
+
+                            // Secondary DOM strategy: find any compact "N / N / N" block.
+                            const compact = Array.from(document.querySelectorAll('div, span')).find((el) => {
+                                const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+                                return /^\d+\s*\/\s*\d+\s*\/\s*\d+$/.test(t);
+                            });
+                            if (compact) {
+                                const t = (compact.textContent || '').replace(/\s+/g, ' ').trim();
+                                const m = t.match(/^(\d+)\s*\/\s*(\d+)\s*\/\s*(\d+)$/);
+                                if (m) {
+                                    return {
+                                        wins: parseInt(m[1], 10),
+                                        losses: parseInt(m[2], 10),
+                                        draws: parseInt(m[3], 10),
+                                        source: 'dom-compact-slash',
+                                    };
+                                }
+                            }
+
+                            return null;
+                        }
+                """)
+        except PlaywrightError:
+                dom_wld = None
+
+        if isinstance(dom_wld, dict):
+                try:
+                        return {
+                                "wins": int(dom_wld.get("wins")),
+                                "losses": int(dom_wld.get("losses")),
+                                "draws": int(dom_wld.get("draws")),
+                                "source": str(dom_wld.get("source") or "dom"),
+                        }
+                except Exception:
+                        pass
+
+        try:
+            body_text = page.evaluate("() => (document.body?.innerText || '')")
+        except PlaywrightError:
+            return None
+
+        if not isinstance(body_text, str) or not body_text.strip():
+            return None
+
+        normalized = re.sub(r"\s+", " ", body_text.lower()).strip()
+
+        patterns = [
+            re.compile(r"\bw\s*[-:/|]\s*l\s*[-:/|]\s*d\s*[:=]?\s*(\d+)\s*[-/|]\s*(\d+)\s*[-/|]\s*(\d+)"),
+            re.compile(r"\b(\d+)\s*[-/|]\s*(\d+)\s*[-/|]\s*(\d+)\s*(?:w\s*[-/]?\s*l\s*[-/]?\s*d|wins?\s*losses?\s*draws?)"),
+            re.compile(r"\bwins?\s*[:=]?\s*(\d+)\D{1,25}loss(?:es)?\s*[:=]?\s*(\d+)\D{1,25}draws?\s*[:=]?\s*(\d+)"),
+        ]
+
+        for idx, pat in enumerate(patterns):
+            m = pat.search(normalized)
+            if m is None:
+                continue
+            wins, losses, draws = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            return {
+                "wins": wins,
+                "losses": losses,
+                "draws": draws,
+                "source": f"pattern-{idx + 1}",
+            }
+
+        return None
+
+
 def detect_terminal_page_reason(page) -> Optional[str]:
     try:
-        reason = page.evaluate("""
+        reason = page.evaluate(r"""
             () => {
-              const text = (document.body?.innerText || '').toLowerCase();
-              const checks = [
-                ['you won', 'you won'],
-                ['you lost', 'you lost'],
-                ['draw', 'draw'],
-                ['timed out', 'timed out'],
-                ['timeout', 'timeout'],
-                ['disconnected', 'disconnected'],
-                ['opponent left', 'opponent left'],
-                ['opponent disconnected', 'opponent disconnected'],
-                ['opponent aborted', 'opponent aborted'],
-                ['aborted', 'aborted'],
-                ['cancelled', 'cancelled'],
-                ['canceled', 'canceled'],
-                ['surrendered', 'surrendered'],
-                ['game over', 'game over'],
-              ];
-              for (const [needle, tag] of checks) {
-                if (text.includes(needle)) return tag;
-              }
-              return null;
+                            const normalize = (s) => (s || '')
+                                .toLowerCase()
+                                .replace(/[\u2019']/g, "'")
+                                .replace(/\s+/g, ' ')
+                                .trim();
+
+                            const bodyText = (document.body?.innerText || '');
+                            const lines = bodyText
+                                .split(/\r?\n/)
+                                .map((s) => normalize(s))
+                                .filter((s) => s.length > 0);
+
+                            // Exclude visible profile-name text so usernames like
+                            // "Yup You Lost" do not trigger terminal-state parsing.
+                            const profileTexts = new Set(
+                                Array.from(
+                                    document.querySelectorAll(
+                                        '[appprofileopener], [appProfileOpener], [data-username], app-room-players [title], app-room-players span'
+                                    )
+                                )
+                                    .map((el) => normalize(el.innerText || el.textContent || el.getAttribute('data-username') || el.getAttribute('title') || ''))
+                                    .filter((s) => s.length > 0)
+                            );
+
+                            const filteredLines = lines.filter((line) => !profileTexts.has(line));
+
+                            const matchLine = (re) => filteredLines.some((line) => re.test(line));
+
+                            if (
+                                matchLine(/^you won([!.]|$)/) ||
+                                matchLine(/^you win([!.]|$)/) ||
+                                matchLine(/^you have won([!.]|$)/) ||
+                                matchLine(/\bvictory\b/)
+                            ) return 'you won';
+                            if (
+                                matchLine(/^you lost([!.]|$)/) ||
+                                matchLine(/^you lose([!.]|$)/) ||
+                                matchLine(/^you have lost([!.]|$)/) ||
+                                matchLine(/\bdefeat\b/)
+                            ) return 'you lost';
+                            if (
+                                matchLine(/^draw([!.]|$)/) ||
+                                matchLine(/^it's a draw([!.]|$)/) ||
+                                matchLine(/^its a draw([!.]|$)/) ||
+                                matchLine(/^game drawn([!.]|$)/)
+                            ) return 'draw';
+
+                            if (matchLine(/\bopponent left\b/) || matchLine(/\bopponent quit\b/) || matchLine(/\bopponent has left\b/)) return 'opponent left';
+                            if (matchLine(/\bopponent disconnected\b/)) return 'opponent disconnected';
+                            if (matchLine(/\bopponent aborted\b/)) return 'opponent aborted';
+                            if (matchLine(/\bleft the game\b/)) return 'opponent left';
+                            if (matchLine(/\bdisconnected\b/)) return 'disconnected';
+                            if (matchLine(/^timed out\b/) || matchLine(/^timeout\b/) || matchLine(/\btime out\b/)) return 'timed out';
+                            if (
+                                matchLine(/\byou (have )?(resigned|surrendered|forfeited)\b/) ||
+                                matchLine(/^you gave up([!.]|$)/)
+                            ) return 'you resigned';
+                            if (
+                                matchLine(/\bopponent (has )?(resigned|surrendered|forfeited)\b/) ||
+                                matchLine(/\bopponent gave up\b/)
+                            ) return 'opponent resigned';
+                            if (matchLine(/^game over([!.]|$)/)) return 'game over';
+                            if (matchLine(/\bcancelled\b|\bcanceled\b/)) return 'canceled';
+
+                            // Last-resort broad checks for abort/disconnect pages where text is sparse.
+                            const flat = filteredLines.join('\n');
+                            if (/\bopponent (left|disconnected|aborted|quit)\b/.test(flat)) return 'opponent disconnected';
+                            if (/\bleft the game\b/.test(flat)) return 'opponent left';
+                            if (/\bdisconnected\b/.test(flat)) return 'disconnected';
+                            if (/\btimed out\b|\btimeout\b/.test(flat)) return 'timed out';
+                            if (/\b(resigned|surrendered|forfeited|gave up)\b/.test(flat)) {
+                                if (/\byou\b.*\b(resigned|surrendered|forfeited|gave up)\b/.test(flat)) return 'you resigned';
+                                if (/\byou\b.*\b(win|won)\b/.test(flat) || /\bvictory\b/.test(flat)) return 'you won';
+                                if (/\byou\b.*\b(lose|lost)\b/.test(flat) || /\bdefeat\b/.test(flat)) return 'you lost';
+                                if (/\bopponent\b.*\b(resigned|surrendered|forfeited|gave up)\b/.test(flat)) return 'opponent resigned';
+                            }
+
+                            return null;
             }
         """)
     except PlaywrightError:
@@ -256,9 +407,56 @@ def detect_terminal_page_reason(page) -> Optional[str]:
     return reason if isinstance(reason, str) else None
 
 
+def read_terminal_page_text_snapshot(page) -> Optional[dict]:
+        """Capture normalized terminal text diagnostics for telemetry/debugging."""
+        try:
+                raw = page.evaluate(r"""
+                        () => {
+                            const normalize = (s) => (s || '')
+                                .toLowerCase()
+                                .replace(/[\u2019']/g, "'")
+                                .replace(/\s+/g, ' ')
+                                .trim();
+
+                            const bodyText = (document.body?.innerText || '');
+                            const lines = bodyText
+                                .split(/\r?\n/)
+                                .map((s) => normalize(s))
+                                .filter((s) => s.length > 0);
+
+                            const profileTexts = Array.from(
+                                document.querySelectorAll(
+                                    '[appprofileopener], [appProfileOpener], [data-username], app-room-players [title], app-room-players span'
+                                )
+                            )
+                                .map((el) => normalize(el.innerText || el.textContent || el.getAttribute('data-username') || el.getAttribute('title') || ''))
+                                .filter((s) => s.length > 0);
+
+                            const profileSet = new Set(profileTexts);
+                            const filteredLines = lines.filter((line) => !profileSet.has(line));
+
+                            return {
+                                lines: lines.slice(0, 80),
+                                filteredLines: filteredLines.slice(0, 80),
+                                profileTexts: profileTexts.slice(0, 40),
+                            };
+                        }
+                """)
+        except PlaywrightError:
+                return None
+
+        if not isinstance(raw, dict):
+                return None
+        return {
+                "lines": raw.get("lines") if isinstance(raw.get("lines"), list) else [],
+                "filtered_lines": raw.get("filteredLines") if isinstance(raw.get("filteredLines"), list) else [],
+                "profile_texts": raw.get("profileTexts") if isinstance(raw.get("profileTexts"), list) else [],
+        }
+
+
 def read_post_game_ui_state(page) -> Optional[dict]:
     try:
-        raw = page.evaluate("""
+        raw = page.evaluate(r"""
             () => {
               const text = (document.body?.innerText || '').toLowerCase();
               const clickable = Array.from(document.querySelectorAll('button, [role="button"], a, .btn, [class*="button"]'));
@@ -266,7 +464,13 @@ def read_post_game_ui_state(page) -> Optional[dict]:
               return {
                 hasRematch: labels.includes('rematch'),
                 hasLeaveRoom: labels.includes('leave room') || !!document.querySelector('[aria-label="Leave room"]'),
-                opponentLeft: text.includes('opponent left') || text.includes('opponent disconnected') || text.includes('disconnected'),
+                                opponentLeft: text.includes('opponent left') ||
+                                                            text.includes('opponent disconnected') ||
+                                                            text.includes('opponent aborted') ||
+                                                            text.includes('opponent quit') ||
+                                                            text.includes('opponent has left') ||
+                                                            text.includes('left the game') ||
+                                                            text.includes('disconnected'),
               };
             }
         """)

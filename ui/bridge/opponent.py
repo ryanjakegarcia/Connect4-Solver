@@ -1,5 +1,6 @@
 import re
 import time
+import unicodedata
 from typing import Optional
 
 from playwright.sync_api import Error as PlaywrightError
@@ -45,6 +46,19 @@ def _strip_trailing_tag(value: str) -> str:
 
 
 def sanitize_username(raw: str) -> Optional[str]:
+    def is_allowed_char(ch: str) -> bool:
+        # Accept letters/numbers across scripts plus a small punctuation set
+        # commonly found in player names.
+        if ch in " ._-'()":
+            return True
+        cat = unicodedata.category(ch)
+        if cat.startswith("L") or cat.startswith("N"):
+            return True
+        # Allow combining marks for accented glyph composition.
+        if cat.startswith("M"):
+            return True
+        return False
+
     value = raw.strip()
     value = re.sub(r"\s+", " ", value)
     value = _strip_trailing_tag(value)
@@ -54,7 +68,7 @@ def sanitize_username(raw: str) -> Optional[str]:
     value = _strip_rank_suffix(value)
     if len(value) < 2 or len(value) > 32:
         return None
-    if not re.fullmatch(r"[A-Za-z0-9_.\- ()]+", value):
+    if not all(is_allowed_char(ch) for ch in value):
         return None
     lower = value.lower()
     blocked = {
@@ -90,7 +104,7 @@ def usernames_equivalent(a: Optional[str], b: Optional[str]) -> bool:
 
 
 def read_opponent_username_strict(page, our_username: Optional[str] = None) -> Optional[str]:
-    """Best-effort strict parser: only return username when tied to explicit opponent labels."""
+    """Parse opponent username from structured room-player profile lines only."""
 
     def pick_name(name: Optional[str]) -> Optional[str]:
         if not isinstance(name, str):
@@ -106,165 +120,54 @@ def read_opponent_username_strict(page, our_username: Optional[str] = None) -> O
         try:
             return ctx.evaluate(
                 r"""
-            () => {
-              const pull = (s) => {
-                if (!s) return null;
-                const t = String(s).trim();
-                return t.length ? t : null;
-              };
+                () => {
+                  const pull = (s) => {
+                    if (!s) return null;
+                    const t = String(s).trim();
+                    return t.length ? t : null;
+                  };
 
-              const labelRegex = /\bopponent\b\s*[:\-]?\s*([A-Za-z0-9_.\- ]{2,32})/i;
+                  const addUnique = (arr, v) => {
+                    if (!v) return;
+                    if (!arr.includes(v)) arr.push(v);
+                  };
 
-              const body = document.body?.innerText || '';
-              const mBody = body.match(labelRegex);
-              const labelCandidate = (mBody && mBody[1]) ? pull(mBody[1]) : null;
+                  const roomPlayerProfiles = [];
+                  const roomPlayers = document.querySelector('app-room-players');
+                  if (roomPlayers) {
+                    const profileEls = Array.from(
+                      roomPlayers.querySelectorAll(
+                        'span[appprofileopener], span[appProfileOpener], [appprofileopener], [appProfileOpener]'
+                      )
+                    );
+                    for (const el of profileEls) {
+                      const txt = pull(
+                        el.innerText ||
+                        el.textContent ||
+                        el.getAttribute('data-username') ||
+                        el.getAttribute('title') ||
+                        ''
+                      );
+                      addUnique(roomPlayerProfiles, txt);
+                    }
+                  }
 
-                            const addUnique = (arr, v) => {
-                                if (!v) return;
-                                if (!arr.includes(v)) arr.push(v);
-                            };
-
-                            // Highest-confidence path: profile names that appear in an
-                            // opponent-labeled container/sibling context.
-                            const opponentProfiles = [];
-                            const opponentAnchors = Array.from(
-                                document.querySelectorAll('[class*="opponent" i], [id*="opponent" i], [aria-label*="opponent" i]')
-                            );
-                            const nameSel = '[appprofileopener], [appProfileOpener], [class*="profile" i], [class*="username" i], [data-username], [title]';
-                            for (const anchor of opponentAnchors) {
-                                const local = Array.from(anchor.querySelectorAll(nameSel));
-                                for (const el of local) {
-                                    const txt = pull(el.innerText || el.textContent || el.getAttribute('data-username') || el.getAttribute('title') || '');
-                                    addUnique(opponentProfiles, txt);
-                                }
-
-                                // Some layouts separate the label and name into nearby siblings.
-                                const parent = anchor.parentElement;
-                                if (parent) {
-                                    const nearby = Array.from(parent.querySelectorAll(nameSel));
-                                    for (const el of nearby) {
-                                        const txt = pull(el.innerText || el.textContent || el.getAttribute('data-username') || el.getAttribute('title') || '');
-                                        addUnique(opponentProfiles, txt);
-                                    }
-                                }
-                            }
-
-                            // Fallback: names scoped to live game container only.
-                            const roomProfiles = [];
-                            const boardCell = document.querySelector('.grid-item');
-                            const gameRoot = document.querySelector('#game') ||
-                                (boardCell ? boardCell.closest('#game, [class*="game" i], [id*="game" i], [class*="room" i], [id*="room" i]') : null);
-                            if (gameRoot) {
-                                const roomNameEls = Array.from(gameRoot.querySelectorAll(nameSel));
-                                for (const el of roomNameEls) {
-                                    const txt = pull(el.innerText || el.textContent || el.getAttribute('data-username') || el.getAttribute('title') || '');
-                                    addUnique(roomProfiles, txt);
-                                }
-
-                                                    // High-confidence structured extraction for papergames player header.
-                                                    const roomPlayerProfiles = [];
-                                                    const roomPlayers = document.querySelector('app-room-players');
-                                                    if (roomPlayers) {
-                                                        const profileEls = Array.from(
-                                                            roomPlayers.querySelectorAll(
-                                                                'span[appprofileopener], span[appProfileOpener], [appprofileopener], [appProfileOpener]'
-                                                            )
-                                                        );
-                                                        for (const el of profileEls) {
-                                                            const txt = pull(el.innerText || el.textContent || el.getAttribute('data-username') || el.getAttribute('title') || '');
-                                                            addUnique(roomPlayerProfiles, txt);
-                                                        }
-                                                    }
-                            }
-
-
-                            // Fallback: visible profile-like labels near the board in viewport space.
-                            // This catches layouts where player names live outside #game but still close
-                            // to the board header area, while avoiding distant leaderboard entries.
-                            const boardNearbyProfiles = [];
-                            if (boardCell) {
-                                const boardRect = boardCell.getBoundingClientRect();
-                                const boardLeft = boardRect.left;
-                                const boardRight = boardRect.right;
-                                const boardTop = boardRect.top;
-
-                                const nearNameEls = Array.from(
-                                    document.querySelectorAll(
-                                        '[appprofileopener], [appProfileOpener], span.text-truncate.cursor-pointer, [class*="text-truncate" i][class*="cursor-pointer" i], [class*="username" i], [data-username]'
-                                    )
-                                );
-
-                                for (const el of nearNameEls) {
-                                    const rect = el.getBoundingClientRect();
-                                    if (rect.width <= 0 || rect.height <= 0) continue;
-                                    const cx = rect.left + rect.width / 2;
-                                    const cy = rect.top + rect.height / 2;
-                                    const withinX = cx >= (boardLeft - 220) && cx <= (boardRight + 220);
-                                    const aboveBoard = cy <= (boardTop + 120);
-                                    if (!withinX || !aboveBoard) continue;
-
-                                    const txt = pull(el.innerText || el.textContent || el.getAttribute('data-username') || el.getAttribute('title') || '');
-                                    addUnique(boardNearbyProfiles, txt);
-                                }
-                            }
-              const candidates = Array.from(
-                document.querySelectorAll('[aria-label], [class*="opponent" i], [id*="opponent" i]')
-              );
-              for (const el of candidates) {
-                const txt = ((el.getAttribute('aria-label') || '') + ' ' + (el.innerText || el.textContent || '')).trim();
-                const m = txt.match(labelRegex);
-                if (m && m[1]) {
-                  const c = pull(m[1]);
-                                    if (c) return { labelCandidate: c, opponentProfiles, roomProfiles, roomPlayerProfiles, boardNearbyProfiles };
+                  return { roomPlayerProfiles };
                 }
-              }
-
-                            return { labelCandidate, opponentProfiles, roomProfiles, roomPlayerProfiles, boardNearbyProfiles };
-            }
-            """
+                """
             )
         except PlaywrightError:
             return None
 
     def pick_from_raw(raw) -> Optional[str]:
-        if isinstance(raw, str):
-            return pick_name(raw)
-
         if not isinstance(raw, dict):
             return None
-
-        from_label = pick_name(raw.get("labelCandidate"))
-        if from_label is not None:
-            return from_label
-
-        opponent_profiles = raw.get("opponentProfiles")
-        if isinstance(opponent_profiles, list):
-            for p in opponent_profiles:
-                picked = pick_name(p if isinstance(p, str) else None)
-                if picked is not None:
-                    return picked
-
-        room_profiles = raw.get("roomProfiles")
-        if isinstance(room_profiles, list):
-            for p in room_profiles:
-                picked = pick_name(p if isinstance(p, str) else None)
-                if picked is not None:
-                    return picked
-
         room_player_profiles = raw.get("roomPlayerProfiles")
         if isinstance(room_player_profiles, list):
             for p in room_player_profiles:
                 picked = pick_name(p if isinstance(p, str) else None)
                 if picked is not None:
                     return picked
-
-        board_nearby_profiles = raw.get("boardNearbyProfiles")
-        if isinstance(board_nearby_profiles, list):
-            for p in board_nearby_profiles:
-                picked = pick_name(p if isinstance(p, str) else None)
-                if picked is not None:
-                    return picked
-
         return None
 
     contexts = [page]
@@ -289,7 +192,7 @@ def read_opponent_username_strict(page, our_username: Optional[str] = None) -> O
     if first is not None:
         return first
 
-    # Match header/profile elements can appear a fraction later than board attach.
+    # Header/profile elements may appear shortly after board attach.
     time.sleep(0.12)
     second = try_pick_once()
     if second is not None:

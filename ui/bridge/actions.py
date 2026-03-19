@@ -149,6 +149,176 @@ def click_rematch(page) -> bool:
     return click_button_by_text_tokens(page, ["rematch"])
 
 
+def click_emoji_by_code(page, emoji_code: str) -> bool:
+        """Click a visible emoji button by its hex code (for example: 1f60e)."""
+        normalized = (emoji_code or "").strip().lower()
+        if not normalized:
+                return False
+
+        try:
+                ok = page.evaluate(
+                        """
+                        async (code) => {
+                            const normalized = String(code || '').toLowerCase().replace(/^u\+/, '').replace(/\.png$/, '');
+                            if (!normalized) return false;
+
+                            const isVisible = (el) => {
+                                if (!el) return false;
+                                const r = el.getBoundingClientRect();
+                                if (r.width <= 0 || r.height <= 0) return false;
+                                const style = window.getComputedStyle(el);
+                                return style.visibility !== 'hidden' && style.display !== 'none';
+                            };
+
+                            const isEnabled = (el) => {
+                                if (!el) return false;
+                                const disabled = (el.getAttribute('disabled') !== null) ||
+                                    (el.getAttribute('aria-disabled') || '').toLowerCase() === 'true';
+                                return !disabled;
+                            };
+
+                            const getVisibleEmojiButtons = () => {
+                                const imgs = Array.from(document.querySelectorAll('img.emoji-icon, img[alt="Emoji"], img[src*="/emoji/"]'));
+                                const unique = new Set();
+                                const out = [];
+                                for (const img of imgs) {
+                                    const src = String(img.getAttribute('src') || img.src || '').toLowerCase();
+                                    if (!src.includes('/emoji/')) continue;
+                                    const btn = img.closest('button, [role="button"], a');
+                                    if (!btn || !isVisible(btn) || !isEnabled(btn)) continue;
+                                    if (unique.has(btn)) continue;
+                                    unique.add(btn);
+                                    out.push(btn);
+                                }
+                                return out;
+                            };
+
+                            const isMenuLikelyOpen = () => getVisibleEmojiButtons().length >= 4;
+
+                            const clickTargetEmoji = () => {
+                                const imgs = Array.from(document.querySelectorAll('img.emoji-icon, img[alt="Emoji"], img[src*="/emoji/"]'));
+                                const emojiButtons = getVisibleEmojiButtons();
+                                for (const img of imgs) {
+                                    const src = String(img.getAttribute('src') || img.src || '').toLowerCase();
+                                    if (!src.includes('/emoji/')) continue;
+                                    if (!(src.endsWith(`/${normalized}.png`) || src.includes(`/emoji/${normalized}.png`))) continue;
+
+                                    const button = img.closest('button, [role="button"], a');
+                                    if (!button || !isVisible(button) || !isEnabled(button)) continue;
+
+                                    // Avoid false positives: with menu closed there is often only one
+                                    // visible emoji button (the trigger), not a selectable reaction.
+                                    if (!isMenuLikelyOpen() && emojiButtons.length <= 1) continue;
+
+                                    try {
+                                        button.click();
+                                        return true;
+                                    } catch (_) {}
+
+                                    if (isVisible(img)) {
+                                        try {
+                                            img.click();
+                                            return true;
+                                        } catch (_) {}
+                                    }
+                                }
+                                return false;
+                            };
+
+                            const clickEmoteMenuTrigger = () => {
+                                const emojiButtons = getVisibleEmojiButtons();
+                                if (emojiButtons.length >= 4) return true; // already open
+
+                                // Most reliable closed-state trigger: single visible emoji icon button.
+                                if (emojiButtons.length === 1) {
+                                    try {
+                                        emojiButtons[0].click();
+                                        return true;
+                                    } catch (_) {}
+                                }
+
+                                const allButtons = Array.from(document.querySelectorAll('button, [role="button"]'));
+                                const scored = [];
+
+                                for (const btn of allButtons) {
+                                    if (!isVisible(btn) || !isEnabled(btn)) continue;
+
+                                    const label = (
+                                        (btn.getAttribute('aria-label') || '') + ' ' +
+                                        (btn.getAttribute('title') || '') + ' ' +
+                                        (btn.innerText || btn.textContent || '')
+                                    ).toLowerCase();
+
+                                    const hasTouchTarget = !!btn.querySelector('span.mat-mdc-button-touch-target');
+                                    const hasEmojiChild = !!btn.querySelector('img.emoji-icon, img[alt="Emoji"], img[src*="/emoji/"]');
+                                    const className = String(btn.className || '').toLowerCase();
+
+                                    const looksLikeEmote = label.includes('emoji') || label.includes('emote') || label.includes('reaction');
+                                    const looksLikeSettings =
+                                        label.includes('setting') ||
+                                        label.includes('option') ||
+                                        label.includes('config') ||
+                                        label.includes('profile') ||
+                                        label.includes('account') ||
+                                        label.includes('sound') ||
+                                        label.includes('music');
+
+                                    let score = 0;
+                                    if (looksLikeEmote) score += 100;
+                                    if (hasEmojiChild) score += 60;
+                                    if (hasTouchTarget) score += 8;
+                                    if (className.includes('mat-mdc-icon-button')) score += 5;
+                                    if (looksLikeSettings) score -= 120;
+
+                                    if (score > 0) scored.push({ btn, score });
+                                }
+
+                                scored.sort((a, b) => b.score - a.score);
+                                for (const item of scored) {
+                                    try {
+                                        item.btn.click();
+                                        return true;
+                                    } catch (_) {}
+                                }
+
+                                // Last-resort fallback based on touch-target marker, but only for
+                                // candidates that look emoji-related.
+                                const touchTargets = Array.from(document.querySelectorAll('span.mat-mdc-button-touch-target'));
+                                for (const span of touchTargets) {
+                                    const btn = span.closest('button, [role="button"]');
+                                    if (!btn || !isVisible(btn) || !isEnabled(btn)) continue;
+                                    const label = (
+                                        (btn.getAttribute('aria-label') || '') + ' ' +
+                                        (btn.getAttribute('title') || '') + ' ' +
+                                        (btn.innerText || btn.textContent || '')
+                                    ).toLowerCase();
+                                    const hasEmojiChild = !!btn.querySelector('img.emoji-icon, img[alt="Emoji"], img[src*="/emoji/"]');
+                                    const looksLikeEmote = label.includes('emoji') || label.includes('emote') || label.includes('reaction');
+                                    if (!hasEmojiChild && !looksLikeEmote) continue;
+                                    try {
+                                        btn.click();
+                                        return true;
+                                    } catch (_) {}
+                                }
+
+                                return false;
+                            };
+
+                            if (clickTargetEmoji()) return true;
+                            if (!clickEmoteMenuTrigger()) return false;
+
+                            await new Promise((resolve) => setTimeout(resolve, 160));
+                            return clickTargetEmoji();
+                        }
+                        """,
+                        normalized,
+                )
+        except PlaywrightError:
+                return False
+
+        return bool(ok)
+
+
 def click_play_online_random(page) -> bool:
     try:
         page.locator(
