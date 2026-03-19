@@ -21,3 +21,13 @@ backfill_opening_book_moves
 
 # OS/editor noise
 .DS_Store
+
+#Archive files
+# Bridge runtime stats/log artifacts
+data/bridge_match_history.csv
+data/bridge_stats.json
+data/terminal_reason_events.jsonl
+data/slow_solve_prefixes.log
+data/benchmarks/opponent_solve_time_hist.png
+data/bridge_match_history.csv.bak.*
+data/bridge_stats.json.bak.*
