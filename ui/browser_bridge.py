@@ -556,6 +556,8 @@ WLD_PROBE_LOG_INTERVAL_SEC = 10.0
 STATS_JSON_PATH = "data/bridge_stats.json"
 STATS_CSV_PATH = "data/bridge_match_history.csv"
 TERMINAL_EVENTS_LOG_PATH = "data/terminal_reason_events.jsonl"
+LOSS_SEQUENCES_LOG_PATH = "data/loss_sequences.jsonl"
+OPPONENT_MOVE_TIMINGS_LOG_PATH = "data/opponent_move_timings.jsonl"
 
 
 def ensure_terminal_events_log_exists(path: str) -> None:
@@ -766,6 +768,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--auto-max-games",
+        type=int,
+        default=0,
+        help=(
+            "In auto mode, stop after this many completed games in the current session "
+            "(0 disables)"
+        ),
+    )
+    parser.add_argument(
         "--stats-json",
         default=STATS_JSON_PATH,
         help="Path to persistent bridge stats JSON summary",
@@ -789,6 +800,11 @@ def parse_args() -> argparse.Namespace:
         "--debug-parse",
         action="store_true",
         help="Emit extra parser diagnostics on anomaly/recovery paths",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Verbose logging (show per-move suggestions, think-time breakdowns, and play actions)",
     )
     parser.add_argument(
         "--disable-simple-move-delay",
@@ -957,25 +973,51 @@ def main() -> int:
         pick = random.randint(0, step_count)
         return round(min_sec + (pick * step_sec), 3)
 
-    def delay_for_game_phase_sec(sequence_len: int) -> float:
-        # Sequence length is total plies already played.
-        # 0-4: opening, very slight fixed delay.
+    def delay_profile(sequence: str, our_side: Optional[int]) -> dict[str, float]:
+        # First-pass calibrated profile from collected opponent timings:
+        # - Opening median is much faster than mid/late.
+        # - Mid/late typically sit around ~2.9s median with wide tail.
+        sequence_len = len(sequence)
+
         if sequence_len < 5:
-            return 0.2
-        # 5-6: early transition to deliberate play.
-        if sequence_len < 7:
-            return 0.5
-        # 7-8: begin moderate think time.
-        if sequence_len < 9:
-            return 0.8
-        # 9-10: midgame deepening.
-        if sequence_len < 11:
-            return 1.2
-        # 11-29: varied midgame thinks.
-        if sequence_len < 30:
-            return quantized_random_delay_sec(1.0, 2.0, 0.1)
-        # 30+: speed up near finish.
-        return quantized_random_delay_sec(0.1, 0.2, 0.1)
+            delay = 1.0
+        elif sequence_len < 9:
+            delay = 1.6
+        elif sequence_len < 14:
+            delay = 2.6
+        elif sequence_len < 22:
+            delay = 3.0
+        elif sequence_len < 36:
+            delay = 3.1
+        else:
+            delay = 2.5
+
+        phase_delay = delay
+
+        legal_cols = legal_columns_for_sequence(sequence)
+        # More legal branches generally means more comparison work for humans.
+        complexity_term = ((len(legal_cols) - 1) / 6.0) * 0.3
+        delay += complexity_term
+
+        pressure_term = 0.0
+        if our_side in {1, 2}:
+            opp_side = 2 if our_side == 1 else 1
+            opp_threat_cols = immediate_winning_columns(sequence, opp_side)
+            if opp_threat_cols:
+                # When there is immediate tactical pressure, people play quicker.
+                pressure_term = -0.8
+                delay += pressure_term
+
+        jitter_term = quantized_random_delay_sec(-0.2, 0.2, 0.1)
+        delay += jitter_term
+        final_delay = max(0.2, min(4.5, round(delay, 3)))
+        return {
+            "phase": round(phase_delay, 3),
+            "complexity": round(complexity_term, 3),
+            "pressure": round(pressure_term, 3),
+            "jitter": round(jitter_term, 3),
+            "final": final_delay,
+        }
 
     def legal_columns_for_sequence(sequence: str) -> list[int]:
         heights = [0] * 7
@@ -984,6 +1026,14 @@ def main() -> int:
             if 0 <= idx < 7:
                 heights[idx] += 1
         return [col for col in range(7) if heights[col] < 6]
+
+    def read_live_column_height(col_zero_based: int) -> Optional[int]:
+        if col_zero_based < 0 or col_zero_based > 6:
+            return None
+        counts = read_grid_column_counts(page)
+        if counts is None:
+            return None
+        return counts[col_zero_based]
 
     def immediate_winning_columns(sequence: str, side: int) -> set[int]:
         target_status = "win1" if side == 1 else "win2"
@@ -1037,19 +1087,22 @@ def main() -> int:
                 print("[bridge] Auto delay: disabled")
             else:
                 print(
-                    "[bridge] Auto delay: phase-based "
-                    "(moves 0-4: 0.2s fixed, 5-6: 0.5s, 7-8: 0.8s, 9-10: 1.2s, "
-                    "11-29: 1.0-2.0s random in 0.1s, 30+: 0.1-0.2s random in 0.1s) "
+                    "[bridge] Auto delay: first-pass calibrated phase model "
+                    "(opening fast, mid/late around ~2.8-3.4s) "
                     "with instant play on immediate win/block"
                 )
         print(f"[bridge] Stats: {stats.summary_line()}")
         if args.debug_parse:
             print("[bridge] Parse debug logging enabled (anomaly paths only)")
+        if args.verbose:
+            print("[bridge] Verbose logging enabled")
         if args.mode == "auto":
             print("[bridge] Operator commands: pause | resume | status | wait <sec> | emote [code] | clear | info | quit")
             print("[bridge] Emote aliases: scream, sunglasses, smirk, cry, sob, wave, thumbsup, wink, tongue, sleep, zipper, grin")
             if args.auto_max_runtime_sec and args.auto_max_runtime_sec > 0:
                 print(f"[bridge] Auto max runtime: {float(args.auto_max_runtime_sec):.1f}s")
+            if args.auto_max_games and args.auto_max_games > 0:
+                print(f"[bridge] Auto max games (session): {int(args.auto_max_games)}")
         print("[bridge] Press Ctrl+C to stop")
 
     print_startup_info()
@@ -1095,6 +1148,10 @@ def main() -> int:
     seeking_new_match = False
     last_lifecycle_log = 0.0
     last_resign_hint_log = 0.0
+    last_full_column_block_log = 0.0
+    full_column_block_streak = 0
+    last_full_column_block_col: Optional[int] = None
+    last_full_column_block_seq: Optional[str] = None
     slow_logged_sequences: set[str] = set()
     queued_click_at: Optional[float] = None
     last_queue_click_attempt_at = 0.0
@@ -1130,19 +1187,58 @@ def main() -> int:
         return (wins, losses, draws, games)
 
     session_start_w, session_start_l, session_start_d, session_start_g = _snapshot_totals()
+    session_games_recorded = 0
+    drain_exit_reason = "drain-complete"
 
-    def print_timeout_shutdown_summary(reason: str) -> None:
+    def verbose_log(msg: str) -> None:
+        if args.verbose:
+            print(msg)
+
+    def print_shutdown_summary(reason: str) -> None:
         if auto_runtime.timeout_summary_printed:
             return
         auto_runtime.timeout_summary_printed = True
         elapsed = max(0.0, time.time() - auto_runtime.runtime_start_at)
         end_w, end_l, end_d, end_g = _snapshot_totals()
         print(
-            "[bridge] Timeout shutdown summary: "
+            "[bridge] Shutdown summary: "
             f"reason={reason} elapsed_sec={elapsed:.1f} "
             f"session W-L-D={end_w - session_start_w}-{end_l - session_start_l}-{end_d - session_start_d} "
             f"(games={end_g - session_start_g})"
         )
+
+    def on_game_result_recorded(
+        *,
+        mapped_result: Optional[str],
+        source: str,
+        sequence: Optional[str],
+        sequence_len_hint: Optional[int],
+    ) -> None:
+        nonlocal session_games_recorded
+        nonlocal drain_exit_reason
+        nonlocal current_opponent
+
+        if current_opponent is None and site_mode == "papergames":
+            parsed_opp = read_opponent_username_strict(page, our_username=our_username)
+            if parsed_opp is not None:
+                current_opponent = parsed_opp
+
+        print(f"[bridge] Stats updated: {stats.summary_line()}")
+        append_loss_sequence_log(
+            source=source,
+            mapped_result=mapped_result,
+            sequence=sequence,
+            sequence_len_hint=sequence_len_hint,
+        )
+
+        session_games_recorded += 1
+        if args.mode == "auto" and args.auto_max_games and args.auto_max_games > 0:
+            max_games = int(args.auto_max_games)
+            print(f"[bridge] Session games completed: {session_games_recorded}/{max_games}")
+            if session_games_recorded >= max_games:
+                print("[bridge] Auto max games reached; exiting after current game")
+                drain_exit_reason = "max-games-reached"
+                auto_runtime.exit_requested_after_drain = True
 
     def reset_runtime_for_next_match(
         *,
@@ -1182,6 +1278,10 @@ def main() -> int:
         nonlocal win_emote_sent
         nonlocal site_wld_baseline
         nonlocal opponent_think_started_at
+        nonlocal last_full_column_block_log
+        nonlocal full_column_block_streak
+        nonlocal last_full_column_block_col
+        nonlocal last_full_column_block_seq
 
         reset = RuntimeResetState.for_next_match(fixed_player)
         match_active = reset.match_active
@@ -1215,6 +1315,10 @@ def main() -> int:
         win_emote_sent = False
         site_wld_baseline = None
         opponent_think_started_at = None
+        last_full_column_block_log = 0.0
+        full_column_block_streak = 0
+        last_full_column_block_col = None
+        last_full_column_block_seq = None
 
         if seeking_new_match_value is not None:
             seeking_new_match = seeking_new_match_value
@@ -1233,10 +1337,13 @@ def main() -> int:
         print(f"[bridge] Auto paused: {reason}")
 
     def on_game_resolved_maybe_pause() -> bool:
+        nonlocal drain_exit_reason
+
         if args.mode == "auto" and auto_runtime.control_state == "draining":
             set_auto_control_paused("current game resolved")
             if auto_runtime.auto_quit_after_drain:
                 print("[bridge] Auto runtime limit reached: current game resolved; quitting")
+                drain_exit_reason = "soft-timeout-drain-complete"
                 auto_runtime.exit_requested_after_drain = True
             return True
         return False
@@ -1264,13 +1371,16 @@ def main() -> int:
         mapped_result: Optional[str],
         sequence_len_hint: Optional[int] = None,
     ) -> None:
+        normalized_opponent = (
+            sanitize_username(current_opponent) if isinstance(current_opponent, str) else None
+        )
         event = {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
             "source": source,
             "reason": reason,
             "mapped_result": mapped_result,
             "detected_player": detected_player,
-            "opponent": current_opponent,
+            "opponent": normalized_opponent,
             "sequence_len": sequence_len_hint if sequence_len_hint is not None else len(last_sequence or ""),
             "url": page.url,
             "terminal_snapshot": read_terminal_page_text_snapshot(page),
@@ -1278,6 +1388,84 @@ def main() -> int:
         try:
             os.makedirs(os.path.dirname(TERMINAL_EVENTS_LOG_PATH), exist_ok=True)
             with open(TERMINAL_EVENTS_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event, sort_keys=True) + "\n")
+        except Exception:
+            pass
+
+    def append_loss_sequence_log(
+        *,
+        source: str,
+        mapped_result: Optional[str],
+        sequence: Optional[str],
+        sequence_len_hint: Optional[int] = None,
+    ) -> None:
+        if mapped_result != "loss":
+            return
+
+        seq = sequence if isinstance(sequence, str) else ""
+        normalized_opponent = (
+            sanitize_username(current_opponent) if isinstance(current_opponent, str) else None
+        )
+        opponent_label = normalized_opponent or "unknown-opponent"
+        event = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "source": source,
+            "mapped_result": mapped_result,
+            "detected_player": detected_player,
+            "opponent": normalized_opponent,
+            "opponent_label": opponent_label,
+            "sequence": seq,
+            "sequence_len": sequence_len_hint if sequence_len_hint is not None else len(seq),
+            "url": page.url,
+        }
+        try:
+            os.makedirs(os.path.dirname(LOSS_SEQUENCES_LOG_PATH), exist_ok=True)
+            with open(LOSS_SEQUENCES_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event, sort_keys=True) + "\n")
+            print(f"[bridge] Loss sequence logged ({opponent_label})")
+        except Exception:
+            pass
+
+    def append_opponent_move_timing_log(
+        *,
+        prev_sequence: str,
+        next_sequence: str,
+        think_time_sec: float,
+        move_col: str,
+    ) -> None:
+        move_index_before = len(prev_sequence)
+        move_index_after = len(next_sequence)
+        normalized_opponent = (
+            sanitize_username(current_opponent) if isinstance(current_opponent, str) else None
+        )
+
+        opponent_side: Optional[int] = None
+        opponent_move_number: Optional[int] = None
+        if detected_player == 1:
+            opponent_side = 2
+            opponent_move_number = move_index_after // 2
+        elif detected_player == 2:
+            opponent_side = 1
+            opponent_move_number = (move_index_after + 1) // 2
+
+        event = {
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
+            "opponent": normalized_opponent,
+            "opponent_label": normalized_opponent or "unknown-opponent",
+            "our_side": detected_player,
+            "opponent_side": opponent_side,
+            "move_col": move_col,
+            "move_index_before": move_index_before,
+            "move_index_after": move_index_after,
+            "opponent_move_number": opponent_move_number,
+            "think_time_sec": round(think_time_sec, 6),
+            "prev_sequence": prev_sequence,
+            "sequence": next_sequence,
+            "url": page.url,
+        }
+        try:
+            os.makedirs(os.path.dirname(OPPONENT_MOVE_TIMINGS_LOG_PATH), exist_ok=True)
+            with open(OPPONENT_MOVE_TIMINGS_LOG_PATH, "a", encoding="utf-8") as f:
                 f.write(json.dumps(event, sort_keys=True) + "\n")
         except Exception:
             pass
@@ -1344,7 +1532,12 @@ def main() -> int:
                 emote_context="terminal",
             ):
                 game_result_recorded = True
-                print(f"[bridge] Stats updated: {stats.summary_line()}")
+                on_game_result_recorded(
+                    source=context,
+                    mapped_result=mapped,
+                    sequence=last_sequence,
+                    sequence_len_hint=sequence_len_hint,
+                )
 
         pending_expected_sequence = None
         pending_base_sequence = None
@@ -1463,7 +1656,7 @@ def main() -> int:
                     return 0
 
                 if auto_runtime.exit_requested_after_drain:
-                    print_timeout_shutdown_summary("soft-timeout-drain-complete")
+                    print_shutdown_summary(drain_exit_reason)
                     return 0
 
                 try:
@@ -1505,7 +1698,7 @@ def main() -> int:
                         "[bridge] Auto hard runtime limit reached "
                         f"({runtime_decision.elapsed_sec:.1f}s): force quitting"
                     )
-                    print_timeout_shutdown_summary(runtime_decision.reason or "hard-timeout-force-quit")
+                    print_shutdown_summary(runtime_decision.reason or "hard-timeout-force-quit")
                     return 0
 
                 if runtime_decision.should_quit_now:
@@ -1515,7 +1708,7 @@ def main() -> int:
                         "[bridge] Auto runtime limit reached "
                         f"({runtime_decision.elapsed_sec:.1f}s): quitting"
                     )
-                    print_timeout_shutdown_summary(runtime_decision.reason or "soft-timeout")
+                    print_shutdown_summary(runtime_decision.reason or "soft-timeout")
                     return 0
 
                 if runtime_decision.should_request_drain:
@@ -1786,7 +1979,12 @@ def main() -> int:
                                 emote_context="lobby-fallback",
                             ):
                                 game_result_recorded = True
-                                print(f"[bridge] Stats updated: {stats.summary_line()}")
+                                on_game_result_recorded(
+                                    source="lobby-fallback",
+                                    mapped_result=mapped,
+                                    sequence=last_sequence,
+                                    sequence_len_hint=len(last_sequence),
+                                )
 
                     if not game_result_recorded:
                         site_wld_after = read_site_wld_record(page)
@@ -1816,7 +2014,12 @@ def main() -> int:
                                 emote_context="wld-delta-fallback",
                             ):
                                 game_result_recorded = True
-                                print(f"[bridge] Stats updated: {stats.summary_line()}")
+                                on_game_result_recorded(
+                                    source="wld-delta-fallback",
+                                    mapped_result=inferred_result,
+                                    sequence=last_sequence,
+                                    sequence_len_hint=len(last_sequence or ""),
+                                )
 
                     print("[bridge] Lobby URL detected while match active; recovering to queue flow")
                     if on_game_resolved_maybe_pause():
@@ -2142,7 +2345,12 @@ def main() -> int:
                                         emote_context="post-game-controls-fallback",
                                     ):
                                         game_result_recorded = True
-                                        print(f"[bridge] Stats updated: {stats.summary_line()}")
+                                        on_game_result_recorded(
+                                            source="post-game-controls-fallback",
+                                            mapped_result=mapped,
+                                            sequence=last_sequence,
+                                            sequence_len_hint=len(last_sequence),
+                                        )
 
                             print("[bridge] No sequence but post-game controls detected; entering post-game mode")
                             post_game_mode = True
@@ -2181,9 +2389,10 @@ def main() -> int:
                     and seq_source in {"grid", "grid-delta"}
                 ):
                     if seq.startswith(last_sequence):
-                        # Allow at most two new moves per tick in papergames flow.
-                        # Larger jumps are usually unstable reconstruction frames.
-                        if len(seq) > len(last_sequence) + 2:
+                        # Allow moderate multi-move jumps in papergames flow.
+                        # Polling cadence can skip directly to a later committed state.
+                        jump_len = len(seq) - len(last_sequence)
+                        if jump_len > 8:
                             now = time.time()
                             if now - last_non_monotonic_log >= 5.0:
                                 print("[bridge] Ignoring unstable multi-move papergames snapshot")
@@ -2199,6 +2408,14 @@ def main() -> int:
                             )
                             time.sleep(args.poll_ms / 1000.0)
                             continue
+                        if jump_len > 2:
+                            now = time.time()
+                            if now - last_non_monotonic_log >= 5.0:
+                                print(
+                                    "[bridge] Accepting multi-move papergames snapshot "
+                                    f"(+{jump_len})"
+                                )
+                                last_non_monotonic_log = now
                     else:
                         inferred = infer_single_move_from_count_delta(last_sequence, seq)
                         if inferred is not None:
@@ -2336,7 +2553,7 @@ def main() -> int:
 
                 if seq != last_sequence:
                     prev_sequence = last_sequence
-                    if seq_source:
+                    if args.verbose and seq_source:
                         print(f"[bridge] sequence={seq} (source={seq_source})")
                     else:
                         print(f"[bridge] sequence={seq}")
@@ -2350,7 +2567,7 @@ def main() -> int:
                             opponent_think_started_at = time.time()
                         else:
                             opp_col = seq[-1]
-                            print(f"[bridge] Opponent move: column {opp_col}")
+                            verbose_log(f"[bridge] Opponent move: column {opp_col}")
                             if opponent_think_started_at is not None:
                                 opponent_think_elapsed = max(0.0, time.time() - opponent_think_started_at)
                                 opponent_think_started_at = None
@@ -2358,10 +2575,17 @@ def main() -> int:
                                 if opponent_think_elapsed >= 0.02:
                                     game_opponent_move_total_sec += opponent_think_elapsed
                                     game_opponent_move_samples += 1
-                                    print(
+                                    append_opponent_move_timing_log(
+                                        prev_sequence=prev_sequence,
+                                        next_sequence=seq,
+                                        think_time_sec=opponent_think_elapsed,
+                                        move_col=opp_col,
+                                    )
+                                    verbose_log(
                                         "[bridge] Opponent think time: "
                                         f"{opponent_think_elapsed:.3f}s "
-                                        f"(samples={game_opponent_move_samples})"
+                                        f"(samples={game_opponent_move_samples}, "
+                                        f"move={len(prev_sequence)}->{len(seq)})"
                                     )
                     elif prev_sequence is not None and len(seq) != len(prev_sequence):
                         opponent_think_started_at = None
@@ -2433,7 +2657,12 @@ def main() -> int:
                             emote_context="solver-status",
                         ):
                             game_result_recorded = True
-                            print(f"[bridge] Stats updated: {stats.summary_line()}")
+                            on_game_result_recorded(
+                                source="solver-status",
+                                mapped_result=mapped,
+                                sequence=seq,
+                                sequence_len_hint=len(seq),
+                            )
 
                     if on_game_resolved_maybe_pause():
                         time.sleep(args.poll_ms / 1000.0)
@@ -2516,6 +2745,23 @@ def main() -> int:
                                 try:
                                     retry_col = pending_col
                                     if not isinstance(retry_col, int):
+                                        time.sleep(args.poll_ms / 1000.0)
+                                        continue
+                                    retry_live_height = read_live_column_height(retry_col)
+                                    if retry_live_height is not None and retry_live_height >= 6:
+                                        print(
+                                            "[bridge] Pending retry blocked: "
+                                            f"column {retry_col + 1} is full on board; forcing resync"
+                                        )
+                                        pending_expected_sequence = None
+                                        pending_base_sequence = None
+                                        pending_col = None
+                                        pending_retry_attempted = False
+                                        pending_move_started_at = None
+                                        last_solved_sequence = None
+                                        last_solved_col = None
+                                        blocked_sequence = seq
+                                        blocked_sequence_until = now + 1.5
                                         time.sleep(args.poll_ms / 1000.0)
                                         continue
                                     method = play_column(page, retry_col, site_mode)
@@ -2705,8 +2951,51 @@ def main() -> int:
                     continue
                 move_col = move_col_raw
 
+                if args.mode == "auto" and site_mode == "papergames":
+                    live_height = read_live_column_height(move_col)
+                    if live_height is not None and live_height >= 6:
+                        now = time.time()
+                        is_same_block = (
+                            last_full_column_block_col == move_col
+                            and last_full_column_block_seq == seq
+                        )
+                        if is_same_block:
+                            full_column_block_streak += 1
+                        else:
+                            full_column_block_streak = 1
+                            last_full_column_block_col = move_col
+                            last_full_column_block_seq = seq
+
+                        if now - last_full_column_block_log >= 5.0:
+                            print(
+                                "[bridge] Solver move blocked: "
+                                f"column {move_col + 1} is full on board; waiting for sequence resync"
+                            )
+                            last_full_column_block_log = now
+
+                        last_solved_sequence = None
+                        last_solved_col = None
+                        blocked_sequence = seq
+                        blocked_sequence_until = now + 1.5
+
+                        if full_column_block_streak >= 6:
+                            print(
+                                "[bridge] Repeated full-column block on unchanged sequence; "
+                                "forcing immediate re-evaluation"
+                            )
+                            blocked_sequence = None
+                            blocked_sequence_until = 0.0
+                            full_column_block_streak = 0
+
+                        time.sleep(args.poll_ms / 1000.0)
+                        continue
+                    else:
+                        full_column_block_streak = 0
+                        last_full_column_block_col = None
+                        last_full_column_block_seq = None
+
                 if last_logged_suggestion_seq != seq or last_logged_suggestion_col != move_col:
-                    print(f"[bridge] Suggested move: column {move_col + 1}")
+                    verbose_log(f"[bridge] Suggested move: column {move_col + 1}")
                     last_logged_suggestion_seq = seq
                     last_logged_suggestion_col = move_col
                 last_suggested_col = move_col
@@ -2725,20 +3014,25 @@ def main() -> int:
                 if args.mode == "auto" and not args.disable_simple_move_delay:
                     tactical_reason = tactical_instant_play_reason(seq, move_col, detected_player)
                     if tactical_reason is None:
-                        delay_sec = delay_for_game_phase_sec(len(seq))
+                        delay_parts = delay_profile(seq, detected_player)
+                        delay_sec = float(delay_parts["final"])
                         if delay_sec > 0.0:
-                            print(
+                            verbose_log(
                                 "[bridge] Thinking for "
-                                f"{delay_sec:.2f}s before move (sequence_len={len(seq)})"
+                                f"{delay_sec:.2f}s before move (sequence_len={len(seq)}, "
+                                f"phase={delay_parts['phase']:.1f}, "
+                                f"complexity={delay_parts['complexity']:+.1f}, "
+                                f"pressure={delay_parts['pressure']:+.1f}, "
+                                f"jitter={delay_parts['jitter']:+.1f})"
                             )
                             time.sleep(delay_sec)
                     else:
-                        print(f"[bridge] Playing immediately ({tactical_reason})")
+                        verbose_log(f"[bridge] Playing immediately ({tactical_reason})")
 
                 try:
                     method = play_column(page, move_col, site_mode)
                     if method is not None:
-                        print(f"[bridge] Played column {move_col + 1} ({method})")
+                        verbose_log(f"[bridge] Played column {move_col + 1} ({method})")
                         pending_expected_sequence = seq + str(move_col + 1)
                         pending_base_sequence = seq
                         pending_col = move_col

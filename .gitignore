@@ -27,6 +27,8 @@ backfill_opening_book_moves
 data/bridge_match_history.csv
 data/bridge_stats.json
 data/terminal_reason_events.jsonl
+data/loss_sequences.jsonl
+data/opponent_move_timings.jsonl
 data/slow_solve_prefixes.log
 data/benchmarks/opponent_solve_time_hist.png
 data/bridge_match_history.csv.bak.*

@@ -1,6 +1,22 @@
-#!/bin/bash
-bridgeCommand=".venv/bin/python ui/browser_bridge.py --site-mode papergames --browser firefox --persistent-profile --user-data-dir .pw-user-data-firefox --url https://papergames.io/en/connect4 --mode auto --player auto --post-game-wait-sec 7 --our-username Fenari --auto-max-runtime-sec 10800"
+#!/usr/bin/env bash
+set -euo pipefail
 
-echo $bridgeCommand
+cmd=(
+	.venv/bin/python
+	ui/browser_bridge.py
+	--site-mode papergames
+	--browser firefox
+	--persistent-profile
+	--user-data-dir .pw-user-data-firefox
+	--url https://papergames.io/en/connect4
+	--mode auto
+	--player auto
+	--post-game-wait-sec 7
+	--our-username "Connect 4 Carl"
+	--auto-max-runtime-sec 10800
+)
 
-eval "$bridgeCommand"
+printf '%q ' "${cmd[@]}" "$@"
+printf '\n'
+
+exec "${cmd[@]}" "$@"

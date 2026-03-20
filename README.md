@@ -125,6 +125,12 @@ python3 -m json.tool data/bridge_stats.json
 { head -n 1 data/bridge_match_history.csv; tail -n 20 data/bridge_match_history.csv; } | column -s, -t
 ```
 
+Second-pass delay tuning helper (after collecting more games):
+
+```bash
+.venv/bin/python tools/recommend_delay_profile.py
+```
+
 Recommended auto-mode command:
 
 ```bash
@@ -154,7 +160,7 @@ Install the launcher into your app menu/dock:
 
 ```bash
 mkdir -p ~/.local/share/applications
-cp ui/Connect4-Bridge.desktop ~/.local/share/applications/
+sed "s|__CONNECT4_BOT_ROOT__|$(pwd)|g" ui/Connect4-Bridge.desktop > ~/.local/share/applications/Connect4-Bridge.desktop
 update-desktop-database ~/.local/share/applications 2>/dev/null || true
 ```
 
@@ -212,10 +218,10 @@ Stop backfill/solver processes:
 
 ```bash
 pkill -TERM -f parallel_backfill_opening_book_moves.sh || true
-pkill -TERM -f '/home/fenari/CPSC481/Project/cpp4/solver$' || true
+pkill -TERM -f '(^|/)solver$' || true
 sleep 2
 pkill -KILL -f parallel_backfill_opening_book_moves.sh || true
-pkill -KILL -f '/home/fenari/CPSC481/Project/cpp4/solver$' || true
+pkill -KILL -f '(^|/)solver$' || true
 ```
 
 ## VS Code
