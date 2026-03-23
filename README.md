@@ -34,10 +34,22 @@ Run on website (primary):
 make bridge MODE=auto
 ```
 
+Optional (recommended): provide your username so self-opponent filtering is more reliable:
+
+```bash
+make bridge MODE=auto BRIDGE_USERNAME="Your Username"
+```
+
 Alternate mode (watch/suggest only, no auto-clicks):
 
 ```bash
 make bridge MODE=observe
+```
+
+Confirmation mode (prompts before each click):
+
+```bash
+make bridge MODE=assist
 ```
 
 Manual setup equivalent:
@@ -101,10 +113,34 @@ Recommended auto mode:
 make bridge MODE=auto
 ```
 
+With username:
+
+```bash
+make bridge MODE=auto BRIDGE_USERNAME="Your Username"
+```
+
 If you want non-clicking observation mode:
 
 ```bash
 make bridge MODE=observe
+```
+
+With username:
+
+```bash
+make bridge MODE=observe BRIDGE_USERNAME="Your Username"
+```
+
+If you want confirmation-before-click mode:
+
+```bash
+make bridge MODE=assist
+```
+
+With username:
+
+```bash
+make bridge MODE=assist BRIDGE_USERNAME="Your Username"
 ```
 
 Bridge modes:
@@ -171,7 +207,9 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 make help
 make setup
 make bridge MODE=auto
+make bridge MODE=auto BRIDGE_USERNAME="Your Username"
 make bridge MODE=observe
+make bridge MODE=assist
 make local-ui
 make local-vsai
 make solver
@@ -189,12 +227,19 @@ make setup
 make bridge MODE=auto
 ```
 
-### Should I use `observe` or `auto` mode?
+If you want strict self-username handling in bridge stats/opponent capture:
+
+```bash
+make bridge MODE=auto BRIDGE_USERNAME="Your Username"
+```
+
+### Should I use `observe`, `assist`, or `auto` mode?
 
 - `observe`: reads the board and prints suggestions only
+- `assist`: asks for confirmation before each click
 - `auto`: reads the board and performs clicks automatically
 
-If you are testing selectors, layout, or timing, start with `observe`.
+If you are testing selectors, layout, or timing, start with `observe`, then `assist`, then `auto`.
 
 ### The solver is missing or not found. What do I do?
 

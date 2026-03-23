@@ -2,6 +2,7 @@ CXX := g++
 CXXFLAGS := -std=c++17 -O2
 PYTHON ?= .venv/bin/python
 MODE ?= auto
+BRIDGE_USERNAME ?=
 BUILD_DIR ?= build
 
 .DEFAULT_GOAL := help
@@ -20,6 +21,7 @@ BACKFILL_MOVE := backfill_opening_book_moves
 
 BRIDGE_AUTO_SCRIPT := ui/launch_bridge.sh
 BRIDGE_OBSERVE_SCRIPT := ui/launch_bridge_observe.sh
+BRIDGE_ASSIST_SCRIPT := ui/launch_bridge_assist.sh
 LOCAL_UI_SCRIPT := start-local
 LOCAL_VSAI_SCRIPT := start-vsai
 
@@ -70,7 +72,8 @@ help:
 	@echo "  make local-vsai          Run VS-AI UI launcher script"
 	@echo ""
 	@echo "Browser Bridge"
-	@echo "  make bridge MODE=auto    Run bridge launcher script by MODE (auto|observe)"
+	@echo "  make bridge MODE=auto    Run bridge launcher script by MODE (auto|assist|observe)"
+	@echo "  make bridge MODE=auto BRIDGE_USERNAME='Your Name'"
 	@echo ""
 	@echo "Diagnostics"
 	@echo "  make check-build-env     Check C++ toolchain"
@@ -152,11 +155,25 @@ local-vsai: check-ui-env
 # Browser Bridge
 bridge: check-bridge-env
 	@if [ "$(MODE)" = "auto" ]; then \
-		./$(BRIDGE_AUTO_SCRIPT); \
+		if [ -n "$(BRIDGE_USERNAME)" ]; then \
+			./$(BRIDGE_AUTO_SCRIPT) --our-username "$(BRIDGE_USERNAME)"; \
+		else \
+			./$(BRIDGE_AUTO_SCRIPT); \
+		fi; \
+	elif [ "$(MODE)" = "assist" ]; then \
+		if [ -n "$(BRIDGE_USERNAME)" ]; then \
+			./$(BRIDGE_ASSIST_SCRIPT) --our-username "$(BRIDGE_USERNAME)"; \
+		else \
+			./$(BRIDGE_ASSIST_SCRIPT); \
+		fi; \
 	elif [ "$(MODE)" = "observe" ]; then \
-		./$(BRIDGE_OBSERVE_SCRIPT); \
+		if [ -n "$(BRIDGE_USERNAME)" ]; then \
+			./$(BRIDGE_OBSERVE_SCRIPT) --our-username "$(BRIDGE_USERNAME)"; \
+		else \
+			./$(BRIDGE_OBSERVE_SCRIPT); \
+		fi; \
 	else \
-		echo "Unknown MODE='$(MODE)'. Use MODE=auto or MODE=observe"; \
+		echo "Unknown MODE='$(MODE)'. Use MODE=auto, MODE=assist, or MODE=observe"; \
 		exit 1; \
 	fi
 
@@ -191,6 +208,11 @@ check-bridge-launchers:
 	@if [ ! -x "$(BRIDGE_AUTO_SCRIPT)" ]; then \
 		echo "[preflight] Missing executable launcher: $(BRIDGE_AUTO_SCRIPT)"; \
 		echo "[preflight] Run: chmod +x $(BRIDGE_AUTO_SCRIPT)"; \
+		exit 1; \
+	fi
+	@if [ ! -x "$(BRIDGE_ASSIST_SCRIPT)" ]; then \
+		echo "[preflight] Missing executable launcher: $(BRIDGE_ASSIST_SCRIPT)"; \
+		echo "[preflight] Run: chmod +x $(BRIDGE_ASSIST_SCRIPT)"; \
 		exit 1; \
 	fi
 	@if [ ! -x "$(BRIDGE_OBSERVE_SCRIPT)" ]; then \
