@@ -72,9 +72,12 @@ Modes:
 Auto-mode runtime commands (type into the same terminal and press Enter):
 - `pause`: stop after the current game resolves (or pause immediately if not in-game)
 - `resume`: resume auto actions
+- `start`: trigger matchmaking now (useful in headless mode from lobby/idle states)
 - `status`: print current control state (`running|draining|paused`)
 - `wait <sec>`: change terminal post-game wait timer live while bridge is running
+- `delay [x]`: view or set live auto-delay scale (`x` between `0.00` and `1.80`; `delay 0` means instant play, e.g. `delay 0.95`)
 - `emote [code]`: send an emote now (`code` defaults to `--win-emote-code`, supports aliases like `scream`, e.g. `emote scream` or `emote 1f631`)
+- `board`: print current board ASCII snapshot + current sequence
 - `emote help`: show emote aliases and corresponding hex codes
 - `quit`: exit bridge cleanly
 
@@ -85,9 +88,12 @@ Operator prompt UX:
 Key options:
 - `--player 1|2|auto`: choose your side (or prompt at runtime with `auto`)
 - `--weak`: use weak solver mode (`./solver -w`)
+- `--mute-audio`: force browser audio mute
+- `--with-audio`: allow browser audio (overrides default headless muting)
 - `--auto-rematch`: in auto mode, click Rematch after terminal state when available (default behavior is leave room)
 - `--auto-emote-on-win`: in auto papergames mode, send an emote after wins
 - `--win-emote-code VALUE`: emoji value to click on win (hex or alias; default `1f60e` / `sunglasses`). Aliases: `scream`, `sunglasses`, `smirk`, `cry`, `sob`, `wave`, `thumbsup`, `wink`, `tongue`, `sleep`, `zipper`, `grin`
+- `--end-game-logs`: suppress in-game move/sequence reporting and print final ASCII board + final sequence at game conclusion before the usual match summary
 - `--post-game-wait-sec N`: in auto papergames mode, wait `N` seconds on terminal page before leave/rematch actions (default `5`)
 - `--auto-max-runtime-sec N`: in auto mode, after `N` seconds request drain, then quit automatically once current game resolves (`0` disables, default). Hard safety cutoff is `2N` seconds and force-quits even mid-match.
 - `--post-game-reload-sec N`: in auto papergames mode, reload lobby if post-game controls do not appear within `N` seconds (`0` disables, default)
@@ -99,6 +105,7 @@ Key options:
 - `--config ui/browser_targets.papergames.json`: custom board selector config
 
 Current papergames behavior:
+- In headless mode, bridge mutes audio by default (use `--with-audio` to opt out).
 - Treats a match as active only when URL is a live room route (`/en/r/<roomcode>`), avoiding premature attach on queue routes (`/en/q/<...>`).
 - Uses papergames-specific parsing with grid column-count deltas (`source=grid-delta`) to track moves robustly.
 - Uses solver status endpoint (`sequence!`) to validate snapshots and detect `win1|win2|draw|invalid`.

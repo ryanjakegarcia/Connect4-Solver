@@ -708,6 +708,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weak", action="store_true", help="Use weak solver mode (-w)")
     parser.add_argument("--poll-ms", type=int, default=700, help="Polling interval in ms")
     parser.add_argument("--headless", action="store_true", help="Run browser headless")
+    audio_group = parser.add_mutually_exclusive_group()
+    audio_group.add_argument(
+        "--mute-audio",
+        action="store_true",
+        help="Mute browser audio (enabled by default in headless mode unless --with-audio is set)",
+    )
+    audio_group.add_argument(
+        "--with-audio",
+        action="store_true",
+        help="Allow browser audio (overrides the default headless muting)",
+    )
     parser.add_argument("--window-width", type=int, default=1920, help="Browser window width in pixels")
     parser.add_argument("--window-height", type=int, default=1080, help="Browser window height in pixels")
     parser.add_argument(
@@ -810,6 +821,14 @@ def parse_args() -> argparse.Namespace:
         "--disable-simple-move-delay",
         action="store_true",
         help="Disable phase-based auto delay before bot plays a move",
+    )
+    parser.add_argument(
+        "--end-game-logs",
+        action="store_true",
+        help=(
+            "Suppress in-game move/sequence reporting logs; print final board + sequence "
+            "on game conclusion before match summary"
+        ),
     )
     return parser.parse_args()
 
@@ -921,6 +940,9 @@ def infer_result_from_wld_delta(before: Optional[dict], after: Optional[dict]) -
 
 def main() -> int:
     args = parse_args()
+    if args.headless and not args.with_audio:
+        args.mute_audio = True
+
     ensure_terminal_events_log_exists(TERMINAL_EVENTS_LOG_PATH)
     normalized_win_emote = normalize_emote_code(args.win_emote_code)
     if normalized_win_emote is None:
@@ -964,6 +986,8 @@ def main() -> int:
     if site_mode == "papergames" and our_username is None:
         print("[bridge] Tip: set --our-username to reduce self-as-opponent misclassification")
 
+    delay_scale_runtime = 1.0
+
     def quantized_random_delay_sec(min_sec: float, max_sec: float, step_sec: float = 0.1) -> float:
         if max_sec <= min_sec:
             return min_sec
@@ -974,23 +998,22 @@ def main() -> int:
         return round(min_sec + (pick * step_sec), 3)
 
     def delay_profile(sequence: str, our_side: Optional[int]) -> dict[str, float]:
-        # First-pass calibrated profile from collected opponent timings:
-        # - Opening median is much faster than mid/late.
-        # - Mid/late typically sit around ~2.9s median with wide tail.
+        # Second-pass calibrated profile from collected opponent timings.
+        # Baselines track bucket medians from tools/recommend_delay_profile.py.
         sequence_len = len(sequence)
 
         if sequence_len < 5:
             delay = 1.0
         elif sequence_len < 9:
-            delay = 1.6
+            delay = 1.45
         elif sequence_len < 14:
             delay = 2.6
         elif sequence_len < 22:
-            delay = 3.0
+            delay = 2.89
         elif sequence_len < 36:
-            delay = 3.1
+            delay = 2.89
         else:
-            delay = 2.5
+            delay = 2.46
 
         phase_delay = delay
 
@@ -1010,12 +1033,14 @@ def main() -> int:
 
         jitter_term = quantized_random_delay_sec(-0.2, 0.2, 0.1)
         delay += jitter_term
-        final_delay = max(0.2, min(4.5, round(delay, 3)))
+        scaled_delay = delay * delay_scale_runtime
+        final_delay = max(0.0, min(4.5, round(scaled_delay, 3)))
         return {
             "phase": round(phase_delay, 3),
             "complexity": round(complexity_term, 3),
             "pressure": round(pressure_term, 3),
             "jitter": round(jitter_term, 3),
+            "scale": round(delay_scale_runtime, 3),
             "final": final_delay,
         }
 
@@ -1080,6 +1105,7 @@ def main() -> int:
         print("[bridge] Starting browser bridge")
         print(f"[bridge] URL: {args.url}")
         print(f"[bridge] Browser: {args.browser}")
+        print(f"[bridge] Audio muted: {bool(args.mute_audio)}")
         print(f"[bridge] Site mode: {site_mode}")
         print(f"[bridge] Mode: {args.mode}, player={args.player}, weak={args.weak}")
         if args.mode == "auto":
@@ -1087,8 +1113,8 @@ def main() -> int:
                 print("[bridge] Auto delay: disabled")
             else:
                 print(
-                    "[bridge] Auto delay: first-pass calibrated phase model "
-                    "(opening fast, mid/late around ~2.8-3.4s) "
+                    "[bridge] Auto delay: second-pass calibrated phase model "
+                    "(opening fast, mid/late around ~2.6-2.9s base) "
                     "with instant play on immediate win/block"
                 )
         print(f"[bridge] Stats: {stats.summary_line()}")
@@ -1096,9 +1122,13 @@ def main() -> int:
             print("[bridge] Parse debug logging enabled (anomaly paths only)")
         if args.verbose:
             print("[bridge] Verbose logging enabled")
+        if args.end_game_logs:
+            print("[bridge] End-game logs mode enabled (suppress in-game move/sequence reporting)")
         if args.mode == "auto":
-            print("[bridge] Operator commands: pause | resume | status | wait <sec> | emote [code] | clear | info | quit")
+            print("[bridge] Operator commands: pause | resume | start | status | wait <sec> | delay [x] | emote [code] | board | clear | info | quit")
+            print("[bridge] Delay: scale range x0.00-x1.80 (use 'delay 0' for instant play)")
             print("[bridge] Emote aliases: scream, sunglasses, smirk, cry, sob, wave, thumbsup, wink, tongue, sleep, zipper, grin")
+            print(f"[bridge] Auto delay runtime scale: x{delay_scale_runtime:.2f}")
             if args.auto_max_runtime_sec and args.auto_max_runtime_sec > 0:
                 print(f"[bridge] Auto max runtime: {float(args.auto_max_runtime_sec):.1f}s")
             if args.auto_max_games and args.auto_max_games > 0:
@@ -1157,6 +1187,7 @@ def main() -> int:
     last_queue_click_attempt_at = 0.0
     last_post_game_action_attempt_at = 0.0
     current_opponent: Optional[str] = None
+    end_game_snapshot_printed = False
     game_result_recorded = False
     game_solve_total_sec = 0.0
     game_solve_samples = 0
@@ -1174,6 +1205,7 @@ def main() -> int:
     operator_cmd_queue: queue.Queue[str] = queue.Queue()
     operator_console_stop = threading.Event()
     operator_console_started = False
+    quit_confirmation_pending = False
     last_observed_url = args.url
 
     def _snapshot_totals() -> tuple[int, int, int, int]:
@@ -1189,6 +1221,57 @@ def main() -> int:
     session_start_w, session_start_l, session_start_d, session_start_g = _snapshot_totals()
     session_games_recorded = 0
     drain_exit_reason = "drain-complete"
+
+    def token_char_for_side(side: int) -> str:
+        return "X" if side == 1 else "O"
+
+    def should_suppress_in_game_reporting_logs() -> bool:
+        return bool(args.end_game_logs and match_active and not post_game_mode)
+
+    def render_ascii_board_lines(sequence: str, *, label: str = "Final") -> Optional[list[str]]:
+        if not VALID_SEQ_RE.fullmatch(sequence):
+            return None
+
+        grid = [["."] * 7 for _ in range(6)]
+        heights = [0] * 7
+        token = 1
+        for ch in sequence:
+            col = ord(ch) - ord("1")
+            if col < 0 or col > 6:
+                return None
+            row_fill = heights[col]
+            if row_fill >= 6:
+                return None
+            row = 5 - row_fill
+            grid[row][col] = token_char_for_side(token)
+            heights[col] += 1
+            token = 2 if token == 1 else 1
+
+        lines = [f"[bridge] {label} board state:"]
+        for row in grid:
+            lines.append("[bridge] | " + " ".join(row) + " |")
+        lines.append("[bridge]   1 2 3 4 5 6 7")
+        return lines
+
+    def print_board_and_sequence(sequence: Optional[str], *, label: str = "Final") -> None:
+        seq = sequence if isinstance(sequence, str) else ""
+        if not args.end_game_logs:
+            return
+
+        board_lines = render_ascii_board_lines(seq, label=label)
+        if board_lines is None:
+            print(f"[bridge] {label} board state: unavailable (invalid sequence)")
+        else:
+            for line in board_lines:
+                print(line)
+
+        if seq:
+            print(f"[bridge] {label} sequence: {seq}")
+        else:
+            print(f"[bridge] {label} sequence: (empty)")
+
+    def print_end_game_board_and_sequence(sequence: Optional[str]) -> None:
+        print_board_and_sequence(sequence, label="Final")
 
     def verbose_log(msg: str) -> None:
         if args.verbose:
@@ -1217,11 +1300,16 @@ def main() -> int:
         nonlocal session_games_recorded
         nonlocal drain_exit_reason
         nonlocal current_opponent
+        nonlocal end_game_snapshot_printed
 
         if current_opponent is None and site_mode == "papergames":
             parsed_opp = read_opponent_username_strict(page, our_username=our_username)
             if parsed_opp is not None:
                 current_opponent = parsed_opp
+
+        if args.end_game_logs:
+            print_end_game_board_and_sequence(sequence if isinstance(sequence, str) else last_sequence)
+            end_game_snapshot_printed = True
 
         print(f"[bridge] Stats updated: {stats.summary_line()}")
         append_loss_sequence_log(
@@ -1282,6 +1370,7 @@ def main() -> int:
         nonlocal full_column_block_streak
         nonlocal last_full_column_block_col
         nonlocal last_full_column_block_seq
+        nonlocal end_game_snapshot_printed
 
         reset = RuntimeResetState.for_next_match(fixed_player)
         match_active = reset.match_active
@@ -1319,6 +1408,7 @@ def main() -> int:
         full_column_block_streak = 0
         last_full_column_block_col = None
         last_full_column_block_seq = None
+        end_game_snapshot_printed = False
 
         if seeking_new_match_value is not None:
             seeking_new_match = seeking_new_match_value
@@ -1338,8 +1428,12 @@ def main() -> int:
 
     def on_game_resolved_maybe_pause() -> bool:
         nonlocal drain_exit_reason
+        nonlocal end_game_snapshot_printed
 
         if args.mode == "auto" and auto_runtime.control_state == "draining":
+            if args.end_game_logs and not end_game_snapshot_printed:
+                print_end_game_board_and_sequence(last_sequence)
+                end_game_snapshot_printed = True
             set_auto_control_paused("current game resolved")
             if auto_runtime.auto_quit_after_drain:
                 print("[bridge] Auto runtime limit reached: current game resolved; quitting")
@@ -1554,6 +1648,9 @@ def main() -> int:
 
     def process_one_operator_command(cmd: str):
         nonlocal post_game_wait_sec_runtime
+        nonlocal delay_scale_runtime
+        nonlocal queued_click_at
+        nonlocal quit_confirmation_pending
 
         def clear_terminal_screen() -> None:
             try:
@@ -1564,15 +1661,34 @@ def main() -> int:
                 pass
             print("[bridge] clear failed: terminal does not support clear command")
 
+        def print_current_board_state() -> None:
+            try:
+                sequence_kwargs = build_read_sequence_kwargs(
+                    game_url=args.url,
+                    manual_fallback=False,
+                    manual_mode=args.manual_input_mode,
+                    manual_sequence=manual_sequence,
+                    detected_player=detected_player,
+                    initial_storage_sequence=initial_storage_sequence,
+                )
+                live_seq, _, _ = read_sequence(page, **sequence_kwargs)
+            except PlaywrightError:
+                live_seq = None
+
+            seq_for_board = live_seq if isinstance(live_seq, str) else last_sequence
+            print_board_and_sequence(seq_for_board, label="Current")
+
         cmd_result = process_operator_command(
             cmd,
             auto_control_state=auto_runtime.control_state,
             post_game_wait_sec_runtime=post_game_wait_sec_runtime,
+            delay_scale_runtime=delay_scale_runtime,
             post_game_mode=post_game_mode,
             match_active=match_active,
             seeking_new_match=seeking_new_match,
             site_mode=site_mode,
             last_observed_url=last_observed_url,
+            quit_confirmation_pending=quit_confirmation_pending,
             auto_runtime_limit_sec=auto_runtime.runtime_limit_sec,
             auto_runtime_hard_limit_sec=auto_runtime.runtime_hard_limit_sec,
             auto_runtime_start_at=auto_runtime.runtime_start_at,
@@ -1580,6 +1696,7 @@ def main() -> int:
             normalize_emote_code_fn=normalize_emote_code,
             click_emoji_by_code_fn=lambda code: click_emoji_by_code(page, code),
             clear_terminal_fn=clear_terminal_screen,
+            print_board_fn=print_current_board_state,
             print_info_fn=print_startup_info,
             set_auto_control_paused_fn=set_auto_control_paused,
             is_live_room_url_fn=is_papergames_live_room_url,
@@ -1588,8 +1705,18 @@ def main() -> int:
 
         if cmd_result.auto_control_state is not None:
             auto_runtime.control_state = cmd_result.auto_control_state
+        if cmd_result.quit_confirmation_pending is not None:
+            quit_confirmation_pending = cmd_result.quit_confirmation_pending
         if cmd_result.post_game_wait_sec_runtime is not None:
             post_game_wait_sec_runtime = cmd_result.post_game_wait_sec_runtime
+        if cmd_result.delay_scale_runtime is not None:
+            delay_scale_runtime = cmd_result.delay_scale_runtime
+        if cmd_result.trigger_matchmaking_start:
+            reset_runtime_for_next_match(
+                seeking_new_match_value=True,
+                post_game_waiting_empty_value=False,
+            )
+            queued_click_at = None
         return cmd_result
 
     try:
@@ -1598,6 +1725,7 @@ def main() -> int:
                 p,
                 browser_name=args.browser,
                 headless=args.headless,
+                mute_audio=args.mute_audio,
                 window_width=args.window_width,
                 window_height=args.window_height,
                 persistent_profile=args.persistent_profile,
@@ -1900,6 +2028,7 @@ def main() -> int:
                     match_active = True
                     queued_click_at = None
                     current_opponent = None
+                    end_game_snapshot_printed = False
                     game_result_recorded = False
                     game_solve_total_sec = 0.0
                     game_solve_samples = 0
@@ -2553,10 +2682,11 @@ def main() -> int:
 
                 if seq != last_sequence:
                     prev_sequence = last_sequence
-                    if args.verbose and seq_source:
-                        print(f"[bridge] sequence={seq} (source={seq_source})")
-                    else:
-                        print(f"[bridge] sequence={seq}")
+                    if not should_suppress_in_game_reporting_logs():
+                        if args.verbose and seq_source:
+                            print(f"[bridge] sequence={seq} (source={seq_source})")
+                        else:
+                            print(f"[bridge] sequence={seq}")
 
                     if (
                         prev_sequence is not None
@@ -2567,7 +2697,8 @@ def main() -> int:
                             opponent_think_started_at = time.time()
                         else:
                             opp_col = seq[-1]
-                            verbose_log(f"[bridge] Opponent move: column {opp_col}")
+                            if not should_suppress_in_game_reporting_logs():
+                                verbose_log(f"[bridge] Opponent move: column {opp_col}")
                             if opponent_think_started_at is not None:
                                 opponent_think_elapsed = max(0.0, time.time() - opponent_think_started_at)
                                 opponent_think_started_at = None
@@ -2581,12 +2712,13 @@ def main() -> int:
                                         think_time_sec=opponent_think_elapsed,
                                         move_col=opp_col,
                                     )
-                                    verbose_log(
-                                        "[bridge] Opponent think time: "
-                                        f"{opponent_think_elapsed:.3f}s "
-                                        f"(samples={game_opponent_move_samples}, "
-                                        f"move={len(prev_sequence)}->{len(seq)})"
-                                    )
+                                    if not should_suppress_in_game_reporting_logs():
+                                        verbose_log(
+                                            "[bridge] Opponent think time: "
+                                            f"{opponent_think_elapsed:.3f}s "
+                                            f"(samples={game_opponent_move_samples}, "
+                                            f"move={len(prev_sequence)}->{len(seq)})"
+                                        )
                     elif prev_sequence is not None and len(seq) != len(prev_sequence):
                         opponent_think_started_at = None
 
@@ -2815,7 +2947,10 @@ def main() -> int:
                     else:
                         detected_player = detect_player_from_sequence(seq)
 
-                    print(f"[bridge] Using player side: {detected_player}")
+                    print(
+                        f"[bridge] Using player side: {detected_player} "
+                        f"(token='{token_char_for_side(detected_player)}')"
+                    )
 
                 if not is_our_turn(seq, detected_player):
                     time.sleep(args.poll_ms / 1000.0)
@@ -2995,7 +3130,8 @@ def main() -> int:
                         last_full_column_block_seq = None
 
                 if last_logged_suggestion_seq != seq or last_logged_suggestion_col != move_col:
-                    verbose_log(f"[bridge] Suggested move: column {move_col + 1}")
+                    if not should_suppress_in_game_reporting_logs():
+                        verbose_log(f"[bridge] Suggested move: column {move_col + 1}")
                     last_logged_suggestion_seq = seq
                     last_logged_suggestion_col = move_col
                 last_suggested_col = move_col
@@ -3017,22 +3153,26 @@ def main() -> int:
                         delay_parts = delay_profile(seq, detected_player)
                         delay_sec = float(delay_parts["final"])
                         if delay_sec > 0.0:
-                            verbose_log(
-                                "[bridge] Thinking for "
-                                f"{delay_sec:.2f}s before move (sequence_len={len(seq)}, "
-                                f"phase={delay_parts['phase']:.1f}, "
-                                f"complexity={delay_parts['complexity']:+.1f}, "
-                                f"pressure={delay_parts['pressure']:+.1f}, "
-                                f"jitter={delay_parts['jitter']:+.1f})"
-                            )
+                            if not should_suppress_in_game_reporting_logs():
+                                verbose_log(
+                                    "[bridge] Thinking for "
+                                    f"{delay_sec:.2f}s before move (sequence_len={len(seq)}, "
+                                    f"phase={delay_parts['phase']:.1f}, "
+                                    f"complexity={delay_parts['complexity']:+.1f}, "
+                                    f"pressure={delay_parts['pressure']:+.1f}, "
+                                    f"jitter={delay_parts['jitter']:+.1f}, "
+                                    f"scale=x{delay_parts['scale']:.2f})"
+                                )
                             time.sleep(delay_sec)
                     else:
-                        verbose_log(f"[bridge] Playing immediately ({tactical_reason})")
+                        if not should_suppress_in_game_reporting_logs():
+                            verbose_log(f"[bridge] Playing immediately ({tactical_reason})")
 
                 try:
                     method = play_column(page, move_col, site_mode)
                     if method is not None:
-                        verbose_log(f"[bridge] Played column {move_col + 1} ({method})")
+                        if not should_suppress_in_game_reporting_logs():
+                            verbose_log(f"[bridge] Played column {move_col + 1} ({method})")
                         pending_expected_sequence = seq + str(move_col + 1)
                         pending_base_sequence = seq
                         pending_col = move_col
@@ -3047,7 +3187,8 @@ def main() -> int:
                         if manual_after_play is not None:
                             manual_sequence = manual_after_play
                             last_sequence = manual_sequence
-                            print(f"[bridge] sequence={manual_sequence}")
+                            if not should_suppress_in_game_reporting_logs():
+                                print(f"[bridge] sequence={manual_sequence}")
                 except PlaywrightError:
                     print("[bridge] Click failed during navigation/refresh; retrying")
                 time.sleep(args.poll_ms / 1000.0)

@@ -166,6 +166,9 @@ class OperatorCommandResult:
     should_exit: bool = False
     auto_control_state: Optional[str] = None
     post_game_wait_sec_runtime: Optional[float] = None
+    delay_scale_runtime: Optional[float] = None
+    trigger_matchmaking_start: bool = False
+    quit_confirmation_pending: Optional[bool] = None
 
 
 def process_operator_command(
@@ -173,11 +176,13 @@ def process_operator_command(
     *,
     auto_control_state: str,
     post_game_wait_sec_runtime: float,
+    delay_scale_runtime: float,
     post_game_mode: bool,
     match_active: bool,
     seeking_new_match: bool,
     site_mode: str,
     last_observed_url: str,
+    quit_confirmation_pending: bool,
     auto_runtime_limit_sec: Optional[float],
     auto_runtime_hard_limit_sec: Optional[float],
     auto_runtime_start_at: float,
@@ -185,6 +190,7 @@ def process_operator_command(
     normalize_emote_code_fn: Callable[[str], Optional[str]],
     click_emoji_by_code_fn: Callable[[str], bool],
     clear_terminal_fn: Callable[[], None],
+    print_board_fn: Callable[[], None],
     print_info_fn: Callable[[], None],
     set_auto_control_paused_fn: Callable[[str], None],
     is_live_room_url_fn: Callable[[str], bool],
@@ -196,14 +202,47 @@ def process_operator_command(
     if not cmd:
         return result
 
+    if quit_confirmation_pending:
+        if cmd == "y":
+            print("[bridge] Quit requested by operator", flush=True)
+            result.should_exit = True
+            result.quit_confirmation_pending = False
+            return result
+
+        print("[bridge] Quit canceled", flush=True)
+        result.quit_confirmation_pending = False
+
     if cmd in {"quit", "q", "exit"}:
-        print("[bridge] Quit requested by operator")
+        in_live_room = site_mode == "papergames" and is_live_room_url_fn(last_observed_url)
+        in_live_game_session = (
+            match_active
+            and not post_game_mode
+            and auto_control_state in {"running", "draining"}
+        )
+        if site_mode == "papergames":
+            in_live_game_session = in_live_game_session and in_live_room
+
+        if in_live_game_session:
+            print(
+                "[bridge] You are about to quit during a live game session, "
+                "results are not guaranteed to be recorded. "
+                "Do you want to continue? y/N",
+                flush=True,
+            )
+            result.quit_confirmation_pending = True
+            return result
+
+        print("[bridge] Quit requested by operator", flush=True)
         result.should_exit = True
         return result
 
     if cmd in {"help", "h", "?"}:
-        print("[bridge] Commands: pause | resume | status | wait <sec> | emote [code] | clear | info | quit")
+        print(
+            "[bridge] Commands: pause | resume | start | status | wait <sec> | delay [x] | "
+            "emote [code] | board | clear | info | quit"
+        )
         print("[bridge] Emote examples: emote help | emote scream | emote sunglasses | emote 1f631")
+        print("[bridge] Delay examples: delay | delay 0 | delay 0.95 | delay 1.10")
         return result
 
     if cmd in {"clear", "cls"}:
@@ -212,6 +251,10 @@ def process_operator_command(
 
     if cmd in {"info", "i"}:
         print_info_fn()
+        return result
+
+    if cmd in {"board", "b"}:
+        print_board_fn()
         return result
 
     parts = cmd.split()
@@ -265,6 +308,25 @@ def process_operator_command(
         print(f"[bridge] Updated post-game wait to {new_wait:.1f}s")
         return result
 
+    if parts and parts[0] in {"delay", "pace", "tempo"}:
+        if len(parts) == 1:
+            print(f"[bridge] Current auto delay scale: x{delay_scale_runtime:.2f}")
+            return result
+        if len(parts) != 2:
+            print("[bridge] Usage: delay <scale>")
+            return result
+        try:
+            new_scale = float(parts[1])
+        except ValueError:
+            print("[bridge] delay expects a number, e.g. 'delay 0.95'")
+            return result
+        if new_scale < 0.0 or new_scale > 1.8:
+            print("[bridge] delay scale must be between 0.00 and 1.80")
+            return result
+        result.delay_scale_runtime = new_scale
+        print(f"[bridge] Updated auto delay scale to x{new_scale:.2f}")
+        return result
+
     if cmd in {"status", "s"}:
         in_live_room = site_mode == "papergames" and is_live_room_url_fn(last_observed_url)
         runtime_info = ""
@@ -286,7 +348,8 @@ def process_operator_command(
             f"state={auto_control_state} match_active={match_active} "
             f"post_game_mode={post_game_mode} seeking_new_match={seeking_new_match} "
             f"live_room_url={in_live_room} "
-            f"post_game_wait_sec={post_game_wait_sec_runtime:.1f}"
+            f"post_game_wait_sec={post_game_wait_sec_runtime:.1f} "
+            f"delay_scale=x{delay_scale_runtime:.2f}"
             f"{runtime_info}"
         )
         return result
@@ -317,9 +380,26 @@ def process_operator_command(
         print("[bridge] Auto resumed")
         return result
 
+    if cmd in {"start", "queue", "match", "go"}:
+        in_live_room = site_mode == "papergames" and is_live_room_url_fn(last_observed_url)
+        if match_active and in_live_room and not post_game_mode:
+            print("[bridge] Already in a live match")
+            return result
+        if seeking_new_match:
+            print("[bridge] Matchmaking already requested")
+            return result
+
+        # start implies runtime should be actively driving queue controls.
+        if auto_control_state != "running":
+            result.auto_control_state = "running"
+
+        result.trigger_matchmaking_start = True
+        print("[bridge] Start requested: queueing a new match")
+        return result
+
     print(
         f"[bridge] Unknown command: {cmd}. "
-        "Try: pause | resume | status | wait <sec> | emote [code] | clear | info | quit"
+        "Try: pause | resume | start | status | wait <sec> | delay [x] | emote [code] | board | clear | info | quit"
     )
     return result
 
@@ -347,6 +427,10 @@ def handle_operator_command_stream(
             result.auto_control_state = cmd_result.auto_control_state
         if cmd_result.post_game_wait_sec_runtime is not None:
             result.post_game_wait_sec_runtime = cmd_result.post_game_wait_sec_runtime
+        if cmd_result.delay_scale_runtime is not None:
+            result.delay_scale_runtime = cmd_result.delay_scale_runtime
+        if cmd_result.trigger_matchmaking_start:
+            result.trigger_matchmaking_start = True
         if cmd_result.should_exit:
             result.should_exit = True
             return result
@@ -360,6 +444,10 @@ def handle_operator_command_stream(
         result.auto_control_state = cmd_result.auto_control_state
     if cmd_result.post_game_wait_sec_runtime is not None:
         result.post_game_wait_sec_runtime = cmd_result.post_game_wait_sec_runtime
+    if cmd_result.delay_scale_runtime is not None:
+        result.delay_scale_runtime = cmd_result.delay_scale_runtime
+    if cmd_result.trigger_matchmaking_start:
+        result.trigger_matchmaking_start = True
     if cmd_result.should_exit:
         result.should_exit = True
     return result
