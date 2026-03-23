@@ -16,9 +16,11 @@ Create a competitive Connect-4 bot powered by a C++ solver and practical automat
 - `g++` with C++17 support
 - Python 3.10+
 
+Windows build targets are planned but not the primary flow yet.
+
 ## Quick Start
 
-Build binaries and Python environment:
+Build and install everything:
 
 ```bash
 make setup
@@ -26,44 +28,24 @@ make setup
 
 Compiled binaries are produced under `build/` and linked at repo root for compatibility (`./solver`, `./backfill_opening_book_scores`, `./backfill_opening_book_moves`).
 
-Manual equivalent:
+Run on website (primary):
+
+```bash
+make bridge MODE=auto
+```
+
+Alternate mode (watch/suggest only, no auto-clicks):
+
+```bash
+make bridge MODE=observe
+```
+
+Manual setup equivalent:
 
 ```bash
 make venv
 make ui-deps
 make all
-```
-
-## Command Cheatsheet
-
-```bash
-# first-time setup
-make setup
-
-# rebuild C++ binaries only
-make all
-
-# run local UIs
-make local-ui
-make local-vsai
-
-# run browser bridge
-make bridge MODE=observe
-make bridge MODE=auto
-
-# diagnostics
-make check-build-env
-make check-ui-env
-make check-bridge-env
-
-# CI workflows
-make help-ci
-make ci-setup
-make ci-build
-make ci-fast
-make ci-check
-make ci-full
-make ci-smoke
 ```
 
 Run local UIs:
@@ -113,16 +95,16 @@ Install once:
 make ui-deps
 ```
 
-Recommended observe mode:
-
-```bash
-make bridge MODE=observe
-```
-
 Recommended auto mode:
 
 ```bash
 make bridge MODE=auto
+```
+
+If you want non-clicking observation mode:
+
+```bash
+make bridge MODE=observe
 ```
 
 Bridge modes:
@@ -185,7 +167,63 @@ update-desktop-database ~/.local/share/applications 2>/dev/null || true
 
 ## Useful Make Targets
 
-Use `make help` to view the current grouped target list and descriptions.
+```bash
+make help
+make setup
+make bridge MODE=auto
+make bridge MODE=observe
+make local-ui
+make local-vsai
+make solver
+make clean
+```
+
+## FAQ
+
+### How do I start quickly?
+
+Run:
+
+```bash
+make setup
+make bridge MODE=auto
+```
+
+### Should I use `observe` or `auto` mode?
+
+- `observe`: reads the board and prints suggestions only
+- `auto`: reads the board and performs clicks automatically
+
+If you are testing selectors, layout, or timing, start with `observe`.
+
+### The solver is missing or not found. What do I do?
+
+Run:
+
+```bash
+make solver
+```
+
+Then verify:
+
+```bash
+ls -l solver build/solver
+```
+
+### The website UI changed and automation is failing. What now?
+
+- Retry in `observe` mode first to confirm parsing still works.
+- Re-run setup deps to ensure browsers/deps are current: `make ui-deps`.
+- If controls/selectors changed upstream, bridge selector/runtime updates may be required in the repo.
+
+### How do I pause/resume/quit while running auto mode?
+
+Type runtime commands in the same bridge terminal:
+
+- `pause`
+- `resume`
+- `quit`
+- `status`
 
 ## References
 
