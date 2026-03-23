@@ -270,6 +270,10 @@ Type runtime commands in the same bridge terminal:
 - `quit`
 - `status`
 
+### Is observe mode fully stable?
+
+Not yet. Observe mode has known bugs and may occasionally behave inconsistently. If you hit issues, prefer `assist` or `auto` mode for now and report the observed behavior/sequence.
+
 ## References
 
 - http://blog.gamesolver.org/
