@@ -12,6 +12,7 @@ __pycache__/
 .pw-user-data-firefox/
 
 # Build artifacts
+build/
 solver
 solver_check
 test
