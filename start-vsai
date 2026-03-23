@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cmd=(
+	.venv/bin/python
+	ui/connect4vsAI.py
+)
+
+printf '%q ' "${cmd[@]}" "$@"
+printf '\n'
+
+exec "${cmd[@]}" "$@"
