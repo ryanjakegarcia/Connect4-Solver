@@ -23,6 +23,9 @@ backfill_opening_book_moves
 # OS/editor noise
 .DS_Store
 
+# Local private notes (not committed)
+LOCAL_NOTES.md
+
 #Archive files
 # Bridge runtime stats/log artifacts
 data/bridge_match_history.csv
