@@ -822,14 +822,23 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable phase-based auto delay before bot plays a move",
     )
-    parser.add_argument(
+    end_game_logs_group = parser.add_mutually_exclusive_group()
+    end_game_logs_group.add_argument(
         "--end-game-logs",
+        dest="end_game_logs",
         action="store_true",
         help=(
             "Suppress in-game move/sequence reporting logs; print final board + sequence "
-            "on game conclusion before match summary"
+            "on game conclusion before match summary (default: enabled)"
         ),
     )
+    end_game_logs_group.add_argument(
+        "--no-end-game-logs",
+        dest="end_game_logs",
+        action="store_false",
+        help="Disable end-game-only logging mode and restore in-game reporting logs",
+    )
+    parser.set_defaults(end_game_logs=True)
     return parser.parse_args()
 
 
@@ -1253,9 +1262,14 @@ def main() -> int:
         lines.append("[bridge]   1 2 3 4 5 6 7")
         return lines
 
-    def print_board_and_sequence(sequence: Optional[str], *, label: str = "Final") -> None:
+    def print_board_and_sequence(
+        sequence: Optional[str],
+        *,
+        label: str = "Final",
+        force_print: bool = False,
+    ) -> None:
         seq = sequence if isinstance(sequence, str) else ""
-        if not args.end_game_logs:
+        if not args.end_game_logs and not force_print:
             return
 
         board_lines = render_ascii_board_lines(seq, label=label)
@@ -1676,7 +1690,7 @@ def main() -> int:
                 live_seq = None
 
             seq_for_board = live_seq if isinstance(live_seq, str) else last_sequence
-            print_board_and_sequence(seq_for_board, label="Current")
+            print_board_and_sequence(seq_for_board, label="Current", force_print=True)
 
         cmd_result = process_operator_command(
             cmd,
