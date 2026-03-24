@@ -277,6 +277,6 @@ Not yet. Observe mode has known bugs and may occasionally behave inconsistently.
 ## References
 
 - http://blog.gamesolver.org/
-- https://www.youtube.com/watch?v=MMLtza3CZFM&t=5117s
+- https://www.youtube.com/watch?v=MMLtza3CZFM
 - https://en.wikipedia.org/wiki/Minimax
 - https://en.wikipedia.org/wiki/Negamax
