@@ -13,18 +13,26 @@ __pycache__/
 
 # Build artifacts
 build/
+Specifications/
+tools/generate_self_play_suites.py
+tools/generate_uci_seeded_self_play.py
+tools/run_uci_seeded_self_play_shards.py
 solver
 solver_check
 test
 backfill_opening_book
 backfill_opening_book_scores
 backfill_opening_book_moves
+backfill_opening_book_moves.exe
+backfill_opening_book_scores.exe
+solver.exe
 
 # OS/editor noise
 .DS_Store
 
 # Local private notes (not committed)
 LOCAL_NOTES.md
+local_uci_15k_run_commands.sh
 
 #Archive files
 # Bridge runtime stats/log artifacts
@@ -37,3 +45,36 @@ data/slow_solve_prefixes.log
 data/benchmarks/opponent_solve_time_hist.png
 data/bridge_match_history.csv.bak.*
 data/bridge_stats.json.bak.*
+UCI Dataset/
+suites/Midgame-Curated-2026-03-27-difficulty2.txt
+data/uci_shards_bench
+data/uci_shards_block_02000
+data/uci_shards_block_17000
+data/uci_shards_block_32000
+data/uci_shards_block_47000
+data/uci_shards_block_62000
+data/uci_shards_full
+data/uci_shards_smoke
+data/self_play_sequences.jsonl
+data/uci_seeded_self_play_sequences.block_02000.jsonl
+data/uci_seeded_self_play_sequences.block_17000.jsonl
+data/uci_seeded_self_play_sequences.block_32000.jsonl
+data/uci_seeded_self_play_sequences.block_47000.jsonl
+data/uci_seeded_self_play_sequences.block_62000.jsonl
+data/uci_seeded_self_play_sequences.medium.jsonl
+data/uci_seeded_self_play_sequences.sharded.medium.jsonl
+data/uci_seeded_self_play_sequences.sharded.smoke.jsonl
+data/uci_seeded_self_play_sequences.smoke.jsonl
+data/uci_precomputed_seeds.jsonl
+suites/UCI-Midgame-Curated-difficulty30.txt
+suites/UCI-ShardSmoke.txt
+suites/_persist_off.txt
+suites/_persist_on.txt
+data/_suite_smoke_work/
+data/suite_shards_10
+data/suites
+data/_persist_smoke.jsonl
+data/_suite_smoke_input.jsonl
+data/uci_seeded_self_play_sequences.full.dedup.jsonl
+data/uci_seeded_self_play_sequences.full.jsonl
+ml_workspace_handoff/

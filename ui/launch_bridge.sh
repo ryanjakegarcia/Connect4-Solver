@@ -11,7 +11,6 @@ fi
 cd "$ROOT_DIR"
 
 exec "$PYTHON_BIN" "$ROOT_DIR/ui/browser_bridge.py" \
-  --site-mode papergames \
   --browser firefox \
   --persistent-profile \
   --user-data-dir "$ROOT_DIR/.pw-user-data-firefox" \

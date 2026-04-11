@@ -1,5 +1,8 @@
 CXX := g++
 CXXFLAGS := -std=c++17 -O2
+WIN_CXX ?= x86_64-w64-mingw32-g++
+WIN_CXXFLAGS ?= -std=c++17 -O2 -static -static-libgcc -static-libstdc++
+WIN_EXT := .exe
 PYTHON ?= .venv/bin/python
 MODE ?= auto
 BRIDGE_USERNAME ?=
@@ -10,16 +13,23 @@ BUILD_DIR ?= build
 SOLVER_BIN := $(BUILD_DIR)/solver
 SOLVER_SRC := src/solver.cpp
 SOLVER := solver
+SOLVER_WIN_BIN := $(BUILD_DIR)/solver$(WIN_EXT)
+SOLVER_WIN := solver$(WIN_EXT)
 
 BACKFILL_SCORE_BIN := $(BUILD_DIR)/backfill_opening_book_scores
 BACKFILL_SCORE_SRC := tools/backfill_opening_book.cpp
 BACKFILL_SCORE := backfill_opening_book_scores
+BACKFILL_SCORE_WIN_BIN := $(BUILD_DIR)/backfill_opening_book_scores$(WIN_EXT)
+BACKFILL_SCORE_WIN := backfill_opening_book_scores$(WIN_EXT)
 
 BACKFILL_MOVE_BIN := $(BUILD_DIR)/backfill_opening_book_moves
 BACKFILL_MOVE_SRC := tools/backfill_opening_book_moves.cpp
 BACKFILL_MOVE := backfill_opening_book_moves
+BACKFILL_MOVE_WIN_BIN := $(BUILD_DIR)/backfill_opening_book_moves$(WIN_EXT)
+BACKFILL_MOVE_WIN := backfill_opening_book_moves$(WIN_EXT)
 
 BRIDGE_AUTO_SCRIPT := ui/launch_bridge.sh
+BRIDGE_STANDBY_SCRIPT := ui/launch_bridge_standby.sh
 BRIDGE_OBSERVE_SCRIPT := ui/launch_bridge_observe.sh
 BRIDGE_ASSIST_SCRIPT := ui/launch_bridge_assist.sh
 LOCAL_UI_SCRIPT := start-local
@@ -34,11 +44,21 @@ $(eval $(call BUILD_CPP_BIN,$(SOLVER_BIN),$(SOLVER_SRC)))
 $(eval $(call BUILD_CPP_BIN,$(BACKFILL_SCORE_BIN),$(BACKFILL_SCORE_SRC)))
 $(eval $(call BUILD_CPP_BIN,$(BACKFILL_MOVE_BIN),$(BACKFILL_MOVE_SRC)))
 
+$(SOLVER_WIN_BIN): $(SOLVER_SRC) | $(BUILD_DIR)
+	$(WIN_CXX) $(WIN_CXXFLAGS) -o $@ $<
+
+$(BACKFILL_SCORE_WIN_BIN): $(BACKFILL_SCORE_SRC) | $(BUILD_DIR)
+	$(WIN_CXX) $(WIN_CXXFLAGS) -o $@ $<
+
+$(BACKFILL_MOVE_WIN_BIN): $(BACKFILL_MOVE_SRC) | $(BUILD_DIR)
+	$(WIN_CXX) $(WIN_CXXFLAGS) -o $@ $<
+
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 .PHONY: help all build-tools clean venv ui-deps local-ui local-vsai bridge book-status setup setup-ui setup-build \
-	check-build-env check-ui-env check-bridge-env check-local-launchers check-bridge-launchers \
+	check-build-env check-build-env-win check-ui-env check-bridge-env check-local-launchers check-bridge-launchers \
+	solver-win build-tools-win all-win \
 	ci-setup ci-build ci-check ci-fast ci-full ci-smoke help-ci
 
 help:
@@ -50,6 +70,9 @@ help:
 	@echo "  make all                 Build solver and backfill binaries"
 	@echo "  make solver              Build solver binary (compat symlink at ./solver)"
 	@echo "  make build-tools         Build backfill utility binaries"
+	@echo "  make solver-win          Cross-build Windows solver binary (./solver.exe)"
+	@echo "  make build-tools-win     Cross-build Windows backfill binaries"
+	@echo "  make all-win             Cross-build Windows solver + backfill binaries"
 	@echo ""
 	@echo "Setup"
 	@echo "  make setup               Full setup: venv + ui-deps + all"
@@ -72,7 +95,7 @@ help:
 	@echo "  make local-vsai          Run VS-AI UI launcher script"
 	@echo ""
 	@echo "Browser Bridge"
-	@echo "  make bridge MODE=auto    Run bridge launcher script by MODE (auto|assist|observe)"
+	@echo "  make bridge MODE=auto    Run bridge launcher script by MODE (auto|standby|assist|observe)"
 	@echo "  make bridge MODE=auto BRIDGE_USERNAME='Your Name'"
 	@echo ""
 	@echo "Diagnostics"
@@ -95,6 +118,8 @@ help-ci:
 
 # Build
 all: solver build-tools
+
+all-win: solver-win build-tools-win
 
 setup: venv ui-deps all
 
@@ -128,9 +153,16 @@ ci-smoke: ci-build
 solver: check-build-env $(SOLVER_BIN)
 	ln -sfn $(SOLVER_BIN) $(SOLVER)
 
+solver-win: check-build-env-win $(SOLVER_WIN_BIN)
+	ln -sfn $(SOLVER_WIN_BIN) $(SOLVER_WIN)
+
 build-tools: check-build-env $(BACKFILL_SCORE_BIN) $(BACKFILL_MOVE_BIN)
 	ln -sfn $(BACKFILL_SCORE_BIN) $(BACKFILL_SCORE)
 	ln -sfn $(BACKFILL_MOVE_BIN) $(BACKFILL_MOVE)
+
+build-tools-win: check-build-env-win $(BACKFILL_SCORE_WIN_BIN) $(BACKFILL_MOVE_WIN_BIN)
+	ln -sfn $(BACKFILL_SCORE_WIN_BIN) $(BACKFILL_SCORE_WIN)
+	ln -sfn $(BACKFILL_MOVE_WIN_BIN) $(BACKFILL_MOVE_WIN)
 
 # Python / UI
 venv:
@@ -160,6 +192,12 @@ bridge: check-bridge-env
 		else \
 			./$(BRIDGE_AUTO_SCRIPT); \
 		fi; \
+	elif [ "$(MODE)" = "standby" ]; then \
+		if [ -n "$(BRIDGE_USERNAME)" ]; then \
+			./$(BRIDGE_STANDBY_SCRIPT) --our-username "$(BRIDGE_USERNAME)"; \
+		else \
+			./$(BRIDGE_STANDBY_SCRIPT); \
+		fi; \
 	elif [ "$(MODE)" = "assist" ]; then \
 		if [ -n "$(BRIDGE_USERNAME)" ]; then \
 			./$(BRIDGE_ASSIST_SCRIPT) --our-username "$(BRIDGE_USERNAME)"; \
@@ -173,7 +211,7 @@ bridge: check-bridge-env
 			./$(BRIDGE_OBSERVE_SCRIPT); \
 		fi; \
 	else \
-		echo "Unknown MODE='$(MODE)'. Use MODE=auto, MODE=assist, or MODE=observe"; \
+		echo "Unknown MODE='$(MODE)'. Use MODE=auto, MODE=standby, MODE=assist, or MODE=observe"; \
 		exit 1; \
 	fi
 
@@ -182,6 +220,13 @@ check-build-env:
 	@command -v $(CXX) >/dev/null 2>&1 || { \
 		echo "[preflight] Missing compiler: $(CXX)"; \
 		echo "[preflight] Install g++ (C++17 capable) and retry."; \
+		exit 1; \
+	}
+
+check-build-env-win:
+	@command -v $(WIN_CXX) >/dev/null 2>&1 || { \
+		echo "[preflight] Missing Windows cross-compiler: $(WIN_CXX)"; \
+		echo "[preflight] Install mingw-w64 and retry (example: sudo apt-get install mingw-w64)."; \
 		exit 1; \
 	}
 
@@ -208,6 +253,11 @@ check-bridge-launchers:
 	@if [ ! -x "$(BRIDGE_AUTO_SCRIPT)" ]; then \
 		echo "[preflight] Missing executable launcher: $(BRIDGE_AUTO_SCRIPT)"; \
 		echo "[preflight] Run: chmod +x $(BRIDGE_AUTO_SCRIPT)"; \
+		exit 1; \
+	fi
+	@if [ ! -x "$(BRIDGE_STANDBY_SCRIPT)" ]; then \
+		echo "[preflight] Missing executable launcher: $(BRIDGE_STANDBY_SCRIPT)"; \
+		echo "[preflight] Run: chmod +x $(BRIDGE_STANDBY_SCRIPT)"; \
 		exit 1; \
 	fi
 	@if [ ! -x "$(BRIDGE_ASSIST_SCRIPT)" ]; then \
@@ -238,5 +288,5 @@ book-status:
 	@awk '!/^#/ && NF>=3 {total++; miss_move=($$2=="-"); miss_score=($$3=="-"); if(miss_move) m++; if(miss_score) s++; if(miss_move||miss_score) either++; if(miss_move&&miss_score) both++;} END {printf "total=%d\nmissing_move=%d\nmissing_score=%d\nmissing_either=%d\nmissing_both=%d\n", total,m,s,either,both;}' data/opening_book.txt
 
 clean:
-	rm -f $(SOLVER) solver_check $(BACKFILL_SCORE) $(BACKFILL_MOVE)
+	rm -f $(SOLVER) $(SOLVER_WIN) solver_check $(BACKFILL_SCORE) $(BACKFILL_MOVE) $(BACKFILL_SCORE_WIN) $(BACKFILL_MOVE_WIN)
 	rm -rf $(BUILD_DIR)

@@ -4,7 +4,6 @@ set -euo pipefail
 cmd=(
 	.venv/bin/python
 	ui/browser_bridge.py
-	--site-mode papergames
 	--browser firefox
 	--persistent-profile
 	--user-data-dir .pw-user-data-firefox

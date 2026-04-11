@@ -96,8 +96,6 @@ def read_sequence(
         seq = detected
 
     if isinstance(seq, str) and VALID_SEQ_RE.fullmatch(seq):
-        if source == "storage" and initial_storage_sequence is not None and seq == initial_storage_sequence:
-            return None, manual_sequence, None
         return seq, seq, source
 
     if not manual_fallback:
@@ -159,7 +157,7 @@ def read_sequence(
 
 
 def probe_sequence(page) -> tuple[Optional[str], Optional[str]]:
-    """Return (sequence, source) where source is one of: cells, storage, or None."""
+    """Return (sequence, source) where source is typically grid or None."""
     try:
         detected = page.evaluate("() => window.__c4Bridge.readMoveSequenceDetailed()")
     except PlaywrightError:

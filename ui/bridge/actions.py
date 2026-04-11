@@ -4,19 +4,6 @@ from typing import Optional
 from playwright.sync_api import Error as PlaywrightError
 
 
-def click_column(page, col: int) -> bool:
-    rect = page.evaluate("() => window.__c4Bridge.boardRect()")
-    if not isinstance(rect, dict):
-        print("[bridge] Could not detect board rectangle for click")
-        return False
-
-    width = float(rect["width"])
-    x = float(rect["x"]) + (col + 0.5) * (width / 7.0)
-    y = float(rect["y"]) + 10.0
-    page.mouse.click(x, y)
-    return True
-
-
 def click_column_dom(page, col: int) -> bool:
     try:
         ok = page.evaluate("(c) => window.__c4Bridge.clickColumnDom(c)", col)
@@ -25,12 +12,9 @@ def click_column_dom(page, col: int) -> bool:
     return bool(ok)
 
 
-def play_column(page, col: int, site_mode: str) -> Optional[str]:
-    # Prefer DOM-targeted clicks in papergames mode, then fallback to coordinate click.
-    if site_mode == "papergames" and click_column_dom(page, col):
+def play_column(page, col: int) -> Optional[str]:
+    if click_column_dom(page, col):
         return "dom"
-    if click_column(page, col):
-        return "coord"
     return None
 
 
@@ -146,7 +130,7 @@ def click_leave_room(page) -> bool:
 
 
 def click_rematch(page) -> bool:
-    return click_button_by_text_tokens(page, ["rematch"])
+    return click_button_by_text_tokens(page, ["play", "again"])
 
 
 def click_emoji_by_code(page, emoji_code: str) -> bool:

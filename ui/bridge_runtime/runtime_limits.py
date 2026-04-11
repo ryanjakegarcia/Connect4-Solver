@@ -24,7 +24,7 @@ def evaluate_runtime_limits(
     match_active: bool,
     in_live_room: bool,
 ) -> RuntimeLimitDecision:
-    if mode != "auto":
+    if mode not in {"auto", "standby"}:
         return RuntimeLimitDecision(elapsed_sec=elapsed_sec)
 
     if hard_limit_sec is not None and not hard_already_triggered and elapsed_sec >= hard_limit_sec:

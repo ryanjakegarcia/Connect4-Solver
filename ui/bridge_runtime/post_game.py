@@ -51,7 +51,7 @@ def handle_post_game_flow(
         if debug_enabled:
             print(f"[bridge][debug] {msg}")
 
-    if not (mode == "auto" and site_mode == "papergames" and post_game_mode):
+    if not (mode in {"auto", "standby"} and site_mode == "papergames" and post_game_mode):
         return result
 
     now = time.time()
@@ -67,6 +67,40 @@ def handle_post_game_flow(
 
     in_lobby = in_lobby_url_fn(page.url)
     in_live_room = is_live_room_url_fn(page.url)
+
+    if mode == "standby":
+        try:
+            in_game_ui = has_in_game_ui_fn()
+        except Exception:
+            in_game_ui = False
+
+        # In standby mode, operator controls queue/rematch actions manually.
+        # Exit post-game state once we are either off the live room or gameplay UI is back.
+        if in_lobby or not in_live_room or in_game_ui:
+            if in_game_ui:
+                print("[bridge] Standby: new game UI detected; resuming auto play for active match")
+            elif in_lobby:
+                print("[bridge] Standby: lobby detected; waiting for operator to start next game")
+            else:
+                print("[bridge] Standby: room exited; waiting for operator to start next game")
+
+            # If we stay in the same live room (manual rematch), require one empty
+            # board observation before re-attaching so we do not latch onto stale
+            # terminal board state from the previous game.
+            waiting_for_fresh_board = bool(in_live_room and in_game_ui)
+
+            reset_runtime_for_next_match_fn(
+                seeking_new_match_value=False,
+                post_game_waiting_empty_value=waiting_for_fresh_board,
+            )
+            result.handled = True
+            return result
+
+        if now - last_lifecycle_log >= 5.0:
+            print("[bridge] Standby: post-game detected; waiting for operator to start next game")
+            result.last_lifecycle_log = now
+        result.handled = True
+        return result
 
     # Once we are off the live room, wait on home/queue before re-queuing.
     if in_lobby or not in_live_room:

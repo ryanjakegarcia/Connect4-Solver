@@ -11,11 +11,6 @@ class RuntimeResetState:
     detected_player: Optional[int]
     manual_sequence: Optional[str]
     initial_storage_sequence: Optional[str]
-    pending_expected_sequence: Optional[str]
-    pending_base_sequence: Optional[str]
-    pending_col: Optional[int]
-    pending_retry_attempted: bool
-    pending_move_started_at: Optional[float]
     blocked_sequence: Optional[str]
     blocked_sequence_until: float
     grid_seq_candidate: Optional[str]
@@ -43,11 +38,6 @@ class RuntimeResetState:
             detected_player=fixed_player,
             manual_sequence=None,
             initial_storage_sequence=None,
-            pending_expected_sequence=None,
-            pending_base_sequence=None,
-            pending_col=None,
-            pending_retry_attempted=False,
-            pending_move_started_at=None,
             blocked_sequence=None,
             blocked_sequence_until=0.0,
             grid_seq_candidate=None,

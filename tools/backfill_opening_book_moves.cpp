@@ -9,11 +9,14 @@
 #include <iostream>
 #include <sstream>
 #include <string>
-#include <sys/wait.h>
-#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #include "../src/Position.hpp"
 
@@ -63,12 +66,11 @@ static void parseEntryLine(const std::string &line, Entry &e) {
 }
 
 static std::string makeTmpPath(const char *prefix) {
-    std::string pattern = std::string("/tmp/") + prefix + "XXXXXX";
-    std::vector<char> buf(pattern.begin(), pattern.end());
-    buf.push_back('\0');
-    int fd = mkstemp(buf.data());
-    if (fd >= 0) close(fd);
-    return std::string(buf.data());
+    char tmp_buf[L_tmpnam];
+    if (std::tmpnam(tmp_buf) == nullptr) {
+        return std::string(prefix) + "_fallback.tmp";
+    }
+    return std::string(tmp_buf);
 }
 
 // Runs a batch of seq? queries through one solver process.
@@ -95,9 +97,14 @@ static void solveBestMovesViaBatch(const std::vector<std::string> &seqs,
     }
 
     const int batch_timeout = std::max(1, batch_timeout_sec);
-    const std::string cmd = "timeout " + std::to_string(batch_timeout) + "s " +
-                            solver_bin + " < " + in_path + " > " + out_path +
-                            " 2>/dev/null";
+    std::string cmd;
+#ifdef _WIN32
+    (void)batch_timeout;
+    cmd = solver_bin + " < \"" + in_path + "\" > \"" + out_path + "\" 2>NUL";
+#else
+    cmd = "timeout " + std::to_string(batch_timeout) + "s " +
+          solver_bin + " < \"" + in_path + "\" > \"" + out_path + "\" 2>/dev/null";
+#endif
     const int status = std::system(cmd.c_str());
 
     std::ifstream out_file(out_path);
@@ -113,17 +120,21 @@ static void solveBestMovesViaBatch(const std::vector<std::string> &seqs,
 
     if (status == -1) {
         for (std::size_t i = out_idx; i < seqs.size(); i++) error_count++;
-    } else if (WIFEXITED(status)) {
-        const int code = WEXITSTATUS(status);
-        if (code == 124) {
-            for (std::size_t i = out_idx; i < seqs.size(); i++) timeout_count++;
-        } else if (code != 0) {
-            for (std::size_t i = out_idx; i < seqs.size(); i++) error_count++;
+    } else {
+#ifndef _WIN32
+        if (WIFEXITED(status)) {
+            const int code = WEXITSTATUS(status);
+            if (code == 124) {
+                for (std::size_t i = out_idx; i < seqs.size(); i++) timeout_count++;
+            } else {
+                for (std::size_t i = out_idx; i < seqs.size(); i++) error_count++;
+            }
         } else {
             for (std::size_t i = out_idx; i < seqs.size(); i++) error_count++;
         }
-    } else {
+#else
         for (std::size_t i = out_idx; i < seqs.size(); i++) error_count++;
+#endif
     }
 
     std::remove(in_path.c_str());
@@ -229,7 +240,9 @@ int main(int argc, char **argv) {
 
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
+#ifndef _WIN32
     std::signal(SIGTSTP, handleSignal);
+#endif
 
     std::ifstream in(book_path);
     if (!in.is_open()) {

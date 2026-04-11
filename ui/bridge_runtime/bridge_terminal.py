@@ -195,6 +195,7 @@ def process_operator_command(
     set_auto_control_paused_fn: Callable[[str], None],
     is_live_room_url_fn: Callable[[str], bool],
     emote_aliases: dict[str, str],
+    allow_matchmaking_start: bool,
 ) -> OperatorCommandResult:
     """Process one runtime operator command and return state updates."""
     result = OperatorCommandResult()
@@ -238,7 +239,7 @@ def process_operator_command(
 
     if cmd in {"help", "h", "?"}:
         print(
-            "[bridge] Commands: pause | resume | start | status | wait <sec> | delay [x] | "
+            "[bridge] Commands: pause | resume | start(auto only) | status | wait <sec> | delay [x] | "
             "emote [code] | board | clear | info | quit"
         )
         print("[bridge] Emote examples: emote help | emote scream | emote sunglasses | emote 1f631")
@@ -381,6 +382,9 @@ def process_operator_command(
         return result
 
     if cmd in {"start", "queue", "match", "go"}:
+        if not allow_matchmaking_start:
+            print("[bridge] Start/queue command is unavailable in standby mode")
+            return result
         in_live_room = site_mode == "papergames" and is_live_room_url_fn(last_observed_url)
         if match_active and in_live_room and not post_game_mode:
             print("[bridge] Already in a live match")
@@ -413,7 +417,7 @@ def handle_operator_command_stream(
 ) -> OperatorCommandResult:
     """Consume queued/stdin commands and return the last state update snapshot."""
     result = OperatorCommandResult()
-    if mode != "auto":
+    if mode not in {"auto", "standby"}:
         return result
 
     while True:

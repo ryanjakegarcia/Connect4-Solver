@@ -52,6 +52,12 @@ Confirmation mode (prompts before each click):
 make bridge MODE=assist
 ```
 
+Standby mode (auto-play in active games, operator starts each match manually):
+
+```bash
+make bridge MODE=standby
+```
+
 Manual setup equivalent:
 
 ```bash
@@ -143,17 +149,30 @@ With username:
 make bridge MODE=assist BRIDGE_USERNAME="Your Username"
 ```
 
+If you want auto-play only after you manually enter a game:
+
+```bash
+make bridge MODE=standby
+```
+
+With username:
+
+```bash
+make bridge MODE=standby BRIDGE_USERNAME="Your Username"
+```
+
 Bridge modes:
 
 - `observe`: parse board and print suggestions only
 - `assist`: prompt before click actions
-- `auto`: drive actions automatically
+- `auto`: drive actions automatically, including queue/start flow between games
+- `standby`: auto-play only during an active game; operator starts games manually
 
-Common runtime commands in auto mode (enter in the same terminal):
+Common runtime commands in auto/standby mode (enter in the same terminal):
 
 - `pause`: drain and pause after current game (or pause immediately if idle)
 - `resume`: resume automation
-- `start`: request matchmaking now
+- `start`: request matchmaking now (auto mode only)
 - `status`: print runtime state
 - `wait <sec>`: change post-game wait timer live
 - `delay [x]`: view/set delay scale (`0.00` to `1.80`)
@@ -208,6 +227,7 @@ make help
 make setup
 make bridge MODE=auto
 make bridge MODE=auto BRIDGE_USERNAME="Your Username"
+make bridge MODE=standby
 make bridge MODE=observe
 make bridge MODE=assist
 make local-ui
@@ -233,13 +253,14 @@ If you want strict self-username handling in bridge stats/opponent capture:
 make bridge MODE=auto BRIDGE_USERNAME="Your Username"
 ```
 
-### Should I use `observe`, `assist`, or `auto` mode?
+### Should I use `observe`, `assist`, `standby`, or `auto` mode?
 
 - `observe`: reads the board and prints suggestions only
 - `assist`: asks for confirmation before each click
-- `auto`: reads the board and performs clicks automatically
+- `standby`: auto-plays once you are in a live game, but does not start the next game for you
+- `auto`: reads the board and performs clicks automatically, including queue/start flow
 
-If you are testing selectors, layout, or timing, start with `observe`, then `assist`, then `auto`.
+If you are testing selectors, layout, or timing, start with `observe`, then `assist`, then `standby`, then `auto`.
 
 ### The solver is missing or not found. What do I do?
 
