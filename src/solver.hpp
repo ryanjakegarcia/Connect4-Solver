@@ -11,7 +11,7 @@ constexpr unsigned int log2(unsigned int n)
 
 class Solver{
 private:
-    unsigned long long nodeCount;
+    uint64_t nodeCount;
     
     int columnOrder[Position::WIDTH];
     
@@ -24,7 +24,7 @@ private:
 public:
     int solve(const Position &P, bool weak = false);
 
-    unsigned long long getNodeCount(){
+    uint64_t getNodeCount(){
         return nodeCount;
     }
 

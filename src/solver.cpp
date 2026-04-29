@@ -10,7 +10,7 @@
 #include "MoverSorter.hpp"
 
 
-unsigned long long nodeCount;
+uint64_t nodeCount;
 int columnOrder[Position::WIDTH];
 TranspositionTable<Position::WIDTH * (Position::HEIGHT + 1),
                 log2(Position::MAX_SCORE - Position::MIN_SCORE + 1) + 1,
@@ -232,7 +232,7 @@ Solver::Solver() : nodeCount{0} {
         columnOrder[i] = Position::WIDTH / 2 + (1 - 2 * (i % 2)) * (i + 1) / 2;
 }
 #include <sys/time.h>
-unsigned long long getTimeMicrosec(){
+uint64_t getTimeMicrosec(){
     timeval NOW;
     gettimeofday(&NOW, NULL);
     return NOW.tv_sec*1000000LL + NOW.tv_usec;
@@ -411,7 +411,7 @@ int main(int argc, char** argv){
         else{
             // Original score-only mode, but keep the cache warm across queries.
             solver.resetNodeCount();
-            unsigned long long start_time = getTimeMicrosec();
+            uint64_t start_time = getTimeMicrosec();
             int score;
             if(weak) {
                 if(!getOpeningBookWeakScore(P, score))
@@ -421,7 +421,7 @@ int main(int argc, char** argv){
                 if(!getOpeningBookExactScore(P, score))
                     score = solver.solve(P, false);
             }
-            unsigned long long end_time = getTimeMicrosec();
+            uint64_t end_time = getTimeMicrosec();
             std::cout << line << " " << score << " " << solver.getNodeCount() << " " << (end_time - start_time);
         }
         std::cout << std::endl;
