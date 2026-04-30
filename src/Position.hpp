@@ -190,12 +190,6 @@ public:
    */
   Position() : current_position{0}, mask{0}, moves{0} {}
 
-private:
-  uint64_t current_position;
-  uint64_t mask;
-  unsigned int moves;
-
-public:
   /**
    * Indicates whether a column is playable.
    * @param col: 0-based index of column to play
@@ -203,7 +197,7 @@ public:
    */
   bool canPlay(int col) const
   {
-    return (mask & top_mask_col(col)) == 0;
+    return (mask & topMaskCol(col)) == 0;
   }
 
   /**
@@ -214,7 +208,7 @@ public:
    */
   void playCol(int col)
   {
-    play((mask + bottom_mask_col(col)) & column_mask(col));
+    play((mask + bottomMaskCol(col)) & columnMask(col));
   }
 
   /**
@@ -225,10 +219,18 @@ public:
    */
   bool isWinningMove(int col) const
   {
-    return winning_position() & possible() & column_mask(col);
+    return winning_position() & possible() & columnMask(col);
+  }
+
+  // return a bitmask 1 on all the cells of a given column
+  static constexpr uint64_t columnMask(int col) {
+    return ((UINT64_C(1) << HEIGHT)-1) << col*(HEIGHT+1);
   }
 
 private:
+  uint64_t current_position;
+  uint64_t mask;
+  unsigned int moves;
 
   /*
     * Return a bitmask of the possible winning positions for the current player
@@ -245,7 +247,7 @@ private:
   }
 
   uint64_t possible() const {
-    return (mask + bottom_mask) & board_mask;
+    return (mask + BOTTOM_MASK) & BOARD_MASK;
   }
 
   /**
@@ -285,28 +287,20 @@ private:
     r |= p & (position << (HEIGHT + 2));
     r |= p & (position >> 3*(HEIGHT+2));
 
-    return r & (board_mask ^ mask);
+    return r & (BOARD_MASK ^ mask);
   }
 
   // Static bitmaps
 
-  const static uint64_t bottom_mask = bottom(WIDTH, HEIGHT);
-  const static uint64_t board_mask = bottom_mask * ((1LL << HEIGHT)-1);
+  const static uint64_t BOTTOM_MASK = bottom(WIDTH, HEIGHT);
+  const static uint64_t BOARD_MASK = BOTTOM_MASK * ((1LL << HEIGHT)-1);
 
-  // return a bitmask containg a single 1 corresponding to the top cel of a given column
-  static constexpr uint64_t top_mask_col(int col) {
+  static constexpr uint64_t topMaskCol(int col) {
     return UINT64_C(1) << ((HEIGHT - 1) + col*(HEIGHT+1));
   }
 
-  // return a bitmask containg a single 1 corresponding to the bottom cell of a given column
-  static constexpr uint64_t bottom_mask_col(int col) {
+  static constexpr uint64_t bottomMaskCol(int col) {
     return UINT64_C(1) << col*(HEIGHT+1);
-  }
-
-public:
-  // return a bitmask 1 on all the cells of a given column
-  static constexpr uint64_t column_mask(int col) {
-    return ((UINT64_C(1) << HEIGHT)-1) << col*(HEIGHT+1);
   }
 };
 

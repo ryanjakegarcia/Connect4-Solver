@@ -39,8 +39,8 @@ private:
 
     static const size_t size = next_prime(1 << log_size);
 
-    key_t *K;
-    value_t *V;
+    key_t *keys;
+    value_t *values;
     
     size_t index(uint64_t key) const {
         return key % size;
@@ -48,22 +48,22 @@ private:
 
 public:
     TranspositionTable(){
-        K = new key_t[size];
-        V = new value_t[size];
+        keys = new key_t[size];
+        values = new value_t[size];
         reset();
     }
 
     ~TranspositionTable(){
-        delete[] K;
-        delete[] V;
+        delete[] keys;
+        delete[] values;
     }
 
     /**
      * Empty the table.
      */
     void reset(){
-        memset(K, 0, size * sizeof(key_t));
-        memset(V, 0, size * sizeof(value_t));
+        memset(keys, 0, size * sizeof(key_t));
+        memset(values, 0, size * sizeof(value_t));
     }
 
     /**
@@ -75,8 +75,8 @@ public:
         assert(key >> key_size == 0);
         assert(value >> value_size == 0);
         size_t pos = index(key);
-        K[pos] = key;
-        V[pos] = value;
+        keys[pos] = key;
+        values[pos] = value;
     }
 
     /**
@@ -87,7 +87,7 @@ public:
     value_t get(uint64_t key) const {
         assert(key >> key_size == 0);
         size_t pos = index(key);
-        if(K[pos] == (key_t)key) return V[pos];
+        if(keys[pos] == (key_t)key) return values[pos];
         else return 0;
     }
 };

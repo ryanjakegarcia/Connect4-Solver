@@ -7,14 +7,14 @@
 #include <string>
 #include <unordered_map>
 #include "solver.hpp"
-#include "MoverSorter.hpp"
+#include "MoveSorter.hpp"
 
 
-uint64_t nodeCount;
-int columnOrder[Position::WIDTH];
-TranspositionTable<Position::WIDTH * (Position::HEIGHT + 1),
-                log2(Position::MAX_SCORE - Position::MIN_SCORE + 1) + 1,
-                23> table;
+// uint64_t nodeCount;
+// int columnOrder[Position::WIDTH];
+// TranspositionTable<Position::WIDTH * (Position::HEIGHT + 1),
+//                 log2(Position::MAX_SCORE - Position::MIN_SCORE + 1) + 1,
+//                 23> table;
 
 struct OpeningBook {
     std::unordered_map<uint64_t, int> exactScoreByCanonicalKey;
@@ -171,7 +171,7 @@ int Solver::negamax(const Position &curPos, int alpha, int beta){
     for(int i = Position::WIDTH; i--; ){
         const int col = columnOrder[i];
         if(is_symmetric && col > middle_col) continue;
-        if(uint64_t move = possible & Position::column_mask(col))
+        if(uint64_t move = possible & Position::columnMask(col))
             moves.add(move, curPos.scoreMove(move));
     }
 
