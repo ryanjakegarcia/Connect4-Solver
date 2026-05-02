@@ -12,11 +12,79 @@ Create a competitive Connect-4 bot powered by a C++ solver and practical automat
 
 ## Prerequisites
 
-- Linux/macOS shell
 - `g++` with C++17 support
 - Python 3.10+
+- GNU Make
 
-Windows build targets are planned but not the primary flow yet.
+---
+
+## Platform Setup
+
+### Linux
+
+Install dependencies (Ubuntu/Debian):
+
+```bash
+sudo apt-get install build-essential python3 python3-venv make
+```
+
+Then jump to [Quick Start](#quick-start).
+
+---
+
+### macOS
+
+Install Xcode Command Line Tools (provides `g++` and `make`):
+
+```bash
+xcode-select --install
+```
+
+Install Python 3.10+ if not already present — recommended via [Homebrew](https://brew.sh):
+
+```bash
+brew install python
+```
+
+Then jump to [Quick Start](#quick-start).
+
+---
+
+### Windows 11 (WSL2 — recommended)
+
+The bridge runs inside WSL2 Ubuntu. No code changes required.
+
+**1. Enable WSL2** (run in PowerShell as Administrator):
+
+```powershell
+wsl --install
+```
+
+Restart when prompted. This installs Ubuntu by default.
+
+**2. Open Ubuntu terminal and install deps:**
+
+```bash
+sudo apt-get update
+sudo apt-get install build-essential python3 python3-venv make git
+```
+
+**3. Clone the repo inside WSL2** (not on the Windows filesystem — keep it under `~/`):
+
+```bash
+git clone <repo-url>
+cd Connect4-Bot
+```
+
+**4. Continue with Quick Start below.**
+
+> Note: Playwright will launch Chromium headlessly inside WSL2. If you want to
+> see the browser window, install an X server on Windows (e.g.
+> [VcXsrv](https://sourceforge.net/projects/vcxsrv/)) and set
+> `export DISPLAY=:0` in your WSL2 shell before running the bridge.
+> Alternatively, run headless: `make bridge MODE=auto` works without a display.
+
+---
 
 ## Quick Start
 
