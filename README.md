@@ -46,6 +46,8 @@ Alternate mode (watch/suggest only, no auto-clicks):
 make bridge MODE=observe
 ```
 
+> **Note:** observe mode has known instability. Prefer `assist` or `standby` for reliable sessions.
+
 Confirmation mode (prompts before each click):
 
 ```bash
@@ -176,15 +178,21 @@ Common runtime commands in auto/standby mode (enter in the same terminal):
 - `status`: print runtime state
 - `wait <sec>`: change post-game wait timer live
 - `delay [x]`: view/set delay scale (`0.00` to `1.80`)
+- `emote [code]`: send an emote (hex code or alias)
+- `board`: print current parsed board state
+- `info`: print session info and current settings
+- `clear`: clear terminal output
 - `quit`: clean shutdown
 
 Useful auto flags:
 
 - `--player 1|2|auto`
 - `--weak`
+- `--auto-rematch` — click Rematch after each game instead of leaving the room
 - `--post-game-wait-sec N`
 - `--post-game-reload-sec N`
 - `--auto-max-runtime-sec N`
+- `--auto-max-games N` — stop after N completed games in the session
 - `--stats-json PATH`
 - `--stats-csv PATH`
 - `--stats-reset`
@@ -233,6 +241,8 @@ make bridge MODE=assist
 make local-ui
 make local-vsai
 make solver
+make ci-smoke
+make book-status
 make clean
 ```
 
