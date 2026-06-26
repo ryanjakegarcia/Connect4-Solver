@@ -2,3 +2,5 @@ numpy
 pygame
 playwright
 prompt_toolkit
+scikit-learn
+torch

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import random
 import numpy as np
 import pygame
@@ -6,6 +7,27 @@ import sys
 import os
 import subprocess
 import atexit
+
+
+_UI_DIR      = os.path.dirname(os.path.abspath(__file__))
+_BOT_DIR     = os.path.dirname(_UI_DIR)
+_DEFAULT_NEURAL_MODEL = os.path.join(_BOT_DIR, "models", "connect4_net.pth")
+_DEFAULT_NEURAL_SRC   = os.path.expanduser("~/CPSC483/483-Connect4-ML/src")
+
+
+def _parse_args():
+    p = argparse.ArgumentParser(description="Connect4 vs AI (local UI)")
+    p.add_argument("--strategy", choices=["solver", "ml", "neural"], default="solver")
+    p.add_argument("--ml-model", default=None, help="Path to .pkl sklearn model")
+    p.add_argument("--ml-difficulty", choices=["hard", "medium", "easy"], default="hard")
+    p.add_argument("--neural-model", default=_DEFAULT_NEURAL_MODEL, help="Path to .pth CNN checkpoint")
+    p.add_argument("--neural-src", default=_DEFAULT_NEURAL_SRC, help="Path to 483-Connect4-ML/src/")
+    p.add_argument("--neural-filters", type=int, default=64)
+    p.add_argument("--neural-residuals", type=int, default=6)
+    p.add_argument("--neural-simulations", type=int, default=200)
+    return p.parse_args()
+
+_args = _parse_args()
 
 BLUE = (0, 0, 255)
 BLACK = (0, 0, 0)
@@ -183,54 +205,70 @@ def write_score_to_file(winner):
 
 SOLVER_PATH = os.path.join(BASE_DIR, "..", "solver")
 
-solver_proc = subprocess.Popen(
-    [SOLVER_PATH],
-    stdin=subprocess.PIPE,
-    stdout=subprocess.PIPE,
-    text=True,
-    bufsize=1
-)
 
-def cleanup_solver_process():
-    if solver_proc.poll() is None:
-        solver_proc.terminate()
+def _create_ai_client(args):
+    if args.strategy == "ml":
+        sys.path.insert(0, BASE_DIR)
+        from bridge.ml_policy import MLPolicyClient
+        client = MLPolicyClient(args.ml_model, difficulty=args.ml_difficulty)
+        print(f"[vsAI] ML model loaded: {args.ml_model} (difficulty={args.ml_difficulty})")
+        return client
+    if args.strategy == "neural":
+        sys.path.insert(0, BASE_DIR)
+        from bridge.ml_policy import NeuralPolicyClient
+        client = NeuralPolicyClient(
+            model_path=args.neural_model,
+            src_path=args.neural_src,
+            filters=args.neural_filters,
+            n_residuals=args.neural_residuals,
+            simulations=args.neural_simulations,
+        )
+        mode = f"MCTS sims={args.neural_simulations}" if args.neural_simulations > 0 else "greedy"
+        print(f"[vsAI] Neural model loaded: {args.neural_model} ({mode})")
+        return client
+    # solver (default)
+    proc = subprocess.Popen(
+        [SOLVER_PATH],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        text=True, bufsize=1,
+    )
+    atexit.register(lambda: proc.poll() is None and proc.terminate())
+    return proc
 
-atexit.register(cleanup_solver_process)
+
+_ai_client = _create_ai_client(_args)
+
 
 def get_ai_move_from_solver(move_sequence, board):
-    """Ask the C++ solver for the best move. Sends one query per turn."""
+    """Get best move from active AI client (solver, ML, or neural)."""
     valid_cols = get_valid_locations(board)
     if not valid_cols:
         return None
 
-    # Tactical guardrails before consulting the solver.
-    # 1) Always take a forced win.
-    ai_winning_cols = get_immediate_winning_cols(board, AI)
-    if ai_winning_cols:
-        return order_moves(ai_winning_cols)[0]
-
-    # 2) Always block opponent's immediate win.
-    player_winning_cols = get_immediate_winning_cols(board, PLAYER)
-    if player_winning_cols:
-        return order_moves(player_winning_cols)[0]
-
-    query = move_sequence + "?"
-    solver_stdin = solver_proc.stdin
-    solver_stdout = solver_proc.stdout
-    if solver_stdin is None or solver_stdout is None:
+    if _args.strategy in ("ml", "neural"):
+        try:
+            col = _ai_client.best_move(move_sequence)  # 0-based
+            if is_valid_location(board, col):
+                return col
+        except Exception as e:
+            print(f"[vsAI] client error: {e}")
         return order_moves(valid_cols)[0]
 
+    # solver subprocess path
+    query = move_sequence + "?"
+    solver_stdin = _ai_client.stdin
+    solver_stdout = _ai_client.stdout
+    if solver_stdin is None or solver_stdout is None:
+        return order_moves(valid_cols)[0]
     solver_stdin.write(query + "\n")
     solver_stdin.flush()
     response = solver_stdout.readline().strip()
     try:
-        col = int(response) - 1  # solver returns 1-based column
+        col = int(response) - 1  # solver returns 1-based
         if is_valid_location(board, col):
             return col
     except ValueError:
         pass
-
-    # Fallback: center-first valid column
     return order_moves(valid_cols)[0]
 
 def toggle_auto_mode():

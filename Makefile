@@ -185,35 +185,33 @@ local-vsai: check-ui-env
 	./$(LOCAL_VSAI_SCRIPT)
 
 # Browser Bridge
+# STRATEGY=solver (default), STRATEGY=ml, or STRATEGY=neural
+# When STRATEGY=ml:     ML_MODEL=/path/to/model.pkl  ML_DIFFICULTY=hard|medium|easy
+# When STRATEGY=neural: NEURAL_MODEL=/path/to/model.pth  NEURAL_SRC=/path/to/483-Connect4-ML/src
+#                       NEURAL_FILTERS=64  NEURAL_RESIDUALS=6  NEURAL_SIMULATIONS=200
+# Early-game data collection (solver mode only): COLLECT_EARLY_CSV=/path/to/out.csv COLLECT_EARLY_MAX_PLY=12
+STRATEGY ?= solver
+ML_MODEL ?=
+ML_DIFFICULTY ?= hard
+NEURAL_MODEL ?=
+NEURAL_SRC ?=
+NEURAL_FILTERS ?= 64
+NEURAL_RESIDUALS ?= 6
+NEURAL_SIMULATIONS ?= 200
+COLLECT_EARLY_CSV ?=
+COLLECT_EARLY_MAX_PLY ?= 12
+_BRIDGE_SCRIPT = $(if $(filter auto,$(MODE)),$(BRIDGE_AUTO_SCRIPT),$(if $(filter standby,$(MODE)),$(BRIDGE_STANDBY_SCRIPT),$(if $(filter assist,$(MODE)),$(BRIDGE_ASSIST_SCRIPT),$(if $(filter observe,$(MODE)),$(BRIDGE_OBSERVE_SCRIPT),))))
+_BRIDGE_USER_ARG = $(if $(BRIDGE_USERNAME),--our-username "$(BRIDGE_USERNAME)",)
+_BRIDGE_ML_ARGS = $(if $(filter ml,$(STRATEGY)),--strategy ml --ml-model "$(ML_MODEL)" --ml-difficulty $(ML_DIFFICULTY),)
+_BRIDGE_NEURAL_ARGS = $(if $(filter neural,$(STRATEGY)),--strategy neural --neural-model "$(NEURAL_MODEL)" --neural-src "$(NEURAL_SRC)" --neural-filters $(NEURAL_FILTERS) --neural-residuals $(NEURAL_RESIDUALS) --neural-simulations $(NEURAL_SIMULATIONS),)
+_BRIDGE_COLLECT_ARGS = $(if $(COLLECT_EARLY_CSV),--collect-early-csv "$(COLLECT_EARLY_CSV)" --collect-early-max-ply $(COLLECT_EARLY_MAX_PLY),)
+
 bridge: check-bridge-env
-	@if [ "$(MODE)" = "auto" ]; then \
-		if [ -n "$(BRIDGE_USERNAME)" ]; then \
-			./$(BRIDGE_AUTO_SCRIPT) --our-username "$(BRIDGE_USERNAME)"; \
-		else \
-			./$(BRIDGE_AUTO_SCRIPT); \
-		fi; \
-	elif [ "$(MODE)" = "standby" ]; then \
-		if [ -n "$(BRIDGE_USERNAME)" ]; then \
-			./$(BRIDGE_STANDBY_SCRIPT) --our-username "$(BRIDGE_USERNAME)"; \
-		else \
-			./$(BRIDGE_STANDBY_SCRIPT); \
-		fi; \
-	elif [ "$(MODE)" = "assist" ]; then \
-		if [ -n "$(BRIDGE_USERNAME)" ]; then \
-			./$(BRIDGE_ASSIST_SCRIPT) --our-username "$(BRIDGE_USERNAME)"; \
-		else \
-			./$(BRIDGE_ASSIST_SCRIPT); \
-		fi; \
-	elif [ "$(MODE)" = "observe" ]; then \
-		if [ -n "$(BRIDGE_USERNAME)" ]; then \
-			./$(BRIDGE_OBSERVE_SCRIPT) --our-username "$(BRIDGE_USERNAME)"; \
-		else \
-			./$(BRIDGE_OBSERVE_SCRIPT); \
-		fi; \
-	else \
+	@if [ -z "$(_BRIDGE_SCRIPT)" ]; then \
 		echo "Unknown MODE='$(MODE)'. Use MODE=auto, MODE=standby, MODE=assist, or MODE=observe"; \
 		exit 1; \
 	fi
+	./$(_BRIDGE_SCRIPT) $(_BRIDGE_USER_ARG) $(_BRIDGE_ML_ARGS) $(_BRIDGE_NEURAL_ARGS) $(_BRIDGE_COLLECT_ARGS)
 
 # Diagnostics
 check-build-env:

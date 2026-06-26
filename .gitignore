@@ -78,3 +78,15 @@ data/_suite_smoke_input.jsonl
 data/uci_seeded_self_play_sequences.full.dedup.jsonl
 data/uci_seeded_self_play_sequences.full.jsonl
 ml_workspace_handoff/
+
+# Claude Code artifacts
+.agents/
+CLAUDE.md
+skills-lock.json
+
+# Trained models (large binaries)
+models/
+
+# Generated datasets / benchmark runs
+data/benchmarks/
+data/early_game.csv

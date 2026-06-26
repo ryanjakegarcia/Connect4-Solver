@@ -48,6 +48,7 @@ from bridge.parsing import (
 )
 from bridge.state import RuntimeResetState
 from bridge.stats import BridgeStats, result_from_seq_status, result_from_terminal_reason
+from bridge.ml_policy import MLPolicyClient, NeuralPolicyClient
 from bridge_runtime import (
     AutoRuntimeState,
     EMOTE_ALIASES,
@@ -411,6 +412,51 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--solver", default=default_solver, help="Path to solver binary")
     parser.add_argument("--weak", action="store_true", help="Use weak solver mode (-w)")
+    parser.add_argument(
+        "--strategy",
+        choices=["solver", "ml", "neural"],
+        default="solver",
+        help="Move selection strategy: solver (C++ alpha-beta), ml (sklearn model), neural (CNN+MCTS)",
+    )
+    parser.add_argument(
+        "--ml-model",
+        default=None,
+        help="Path to .pkl sklearn model (required when --strategy=ml)",
+    )
+    parser.add_argument(
+        "--ml-difficulty",
+        choices=["hard", "medium", "easy"],
+        default="hard",
+        help="ML difficulty: hard=argmax, medium=sample, easy=temperature-softened sample",
+    )
+    parser.add_argument(
+        "--neural-model",
+        default=None,
+        help="Path to .pth CNN checkpoint (required when --strategy=neural)",
+    )
+    parser.add_argument(
+        "--neural-src",
+        default=None,
+        help="Path to 483-Connect4-ML/src/ containing network.py and mcts.py",
+    )
+    parser.add_argument(
+        "--neural-filters",
+        type=int,
+        default=64,
+        help="CNN filter count matching the checkpoint (default: 64)",
+    )
+    parser.add_argument(
+        "--neural-residuals",
+        type=int,
+        default=6,
+        help="CNN residual block count matching the checkpoint (default: 6)",
+    )
+    parser.add_argument(
+        "--neural-simulations",
+        type=int,
+        default=200,
+        help="MCTS simulations per move (0 = pure network greedy, default: 200)",
+    )
     parser.add_argument("--poll-ms", type=int, default=700, help="Polling interval in ms")
     parser.add_argument("--headless", action="store_true", help="Run browser headless")
     audio_group = parser.add_mutually_exclusive_group()
@@ -531,6 +577,17 @@ def parse_args() -> argparse.Namespace:
         "--disable-simple-move-delay",
         action="store_true",
         help="Disable phase-based auto delay before bot plays a move",
+    )
+    parser.add_argument(
+        "--collect-early-csv",
+        default=None,
+        help="Path to CSV for collecting early-game solver labels (sequence,best_move,move_count). Only active when --strategy=solver.",
+    )
+    parser.add_argument(
+        "--collect-early-max-ply",
+        type=int,
+        default=12,
+        help="Max move count (inclusive) to record when --collect-early-csv is set (default: 12)",
     )
     end_game_logs_group = parser.add_mutually_exclusive_group()
     end_game_logs_group.add_argument(
@@ -682,12 +739,66 @@ def main() -> int:
         stats.reset()
         print("[bridge] Stats reset requested; cleared JSON/CSV history")
 
-    if not os.path.exists(args.solver):
-        print(f"[bridge] Solver not found at: {args.solver}")
-        print("[bridge] Build with: make solver")
-        return 1
+    if args.strategy == "ml":
+        if not args.ml_model:
+            print("[bridge] --ml-model is required when --strategy=ml")
+            return 1
+        if not os.path.exists(args.ml_model):
+            print(f"[bridge] ML model not found at: {args.ml_model}")
+            return 1
+        move_client = MLPolicyClient(args.ml_model, difficulty=args.ml_difficulty)
+        print(f"[bridge] ML model loaded: {args.ml_model} (difficulty={args.ml_difficulty})")
+        solver = None
+    elif args.strategy == "neural":
+        if not args.neural_model:
+            print("[bridge] --neural-model is required when --strategy=neural")
+            return 1
+        if not os.path.exists(args.neural_model):
+            print(f"[bridge] Neural model not found at: {args.neural_model}")
+            return 1
+        if not args.neural_src:
+            print("[bridge] --neural-src is required when --strategy=neural (path to 483-Connect4-ML/src/)")
+            return 1
+        move_client = NeuralPolicyClient(
+            model_path=args.neural_model,
+            src_path=args.neural_src,
+            filters=args.neural_filters,
+            n_residuals=args.neural_residuals,
+            simulations=args.neural_simulations,
+        )
+        mode = f"MCTS sims={args.neural_simulations}" if args.neural_simulations > 0 else "greedy"
+        print(f"[bridge] Neural model loaded: {args.neural_model} ({mode}, filters={args.neural_filters}, residuals={args.neural_residuals})")
+        solver = None
+    else:
+        if not os.path.exists(args.solver):
+            print(f"[bridge] Solver not found at: {args.solver}")
+            print("[bridge] Build with: make solver")
+            return 1
+        move_client = SolverClient(args.solver, weak=args.weak)
+        solver = move_client
 
-    solver = SolverClient(args.solver, weak=args.weak)
+    # Early-game data collection (solver mode only).
+    early_csv_file = None
+    early_csv_seen: set[str] = set()
+    if args.collect_early_csv and solver is not None:
+        import csv as _csv
+        _early_csv_path = args.collect_early_csv
+        _early_csv_is_new = not os.path.exists(_early_csv_path) or os.path.getsize(_early_csv_path) == 0
+        early_csv_file = open(_early_csv_path, "a", newline="", encoding="utf-8")
+        _early_writer = _csv.writer(early_csv_file)
+        if _early_csv_is_new:
+            _early_writer.writerow(["sequence", "best_move", "move_count"])
+        print(f"[bridge] Early-game CSV collection active: {_early_csv_path} (max_ply={args.collect_early_max_ply})")
+
+        def record_early(seq: str, best_col_0based: int) -> None:
+            if seq in early_csv_seen:
+                return
+            early_csv_seen.add(seq)
+            _early_writer.writerow([seq, best_col_0based + 1, len(seq)])
+            early_csv_file.flush()
+    else:
+        def record_early(seq: str, best_col_0based: int) -> None:
+            pass
 
     site_mode = "papergames"
 
@@ -769,6 +880,8 @@ def main() -> int:
         return counts[col_zero_based]
 
     def immediate_winning_columns(sequence: str, side: int) -> set[int]:
+        if solver is None:
+            return set()
         target_status = "win1" if side == 1 else "win2"
         wins: set[int] = set()
         for col in legal_columns_for_sequence(sequence):
@@ -781,7 +894,7 @@ def main() -> int:
         return wins
 
     def tactical_instant_play_reason(sequence: str, chosen_col: int, our_side: Optional[int]) -> Optional[str]:
-        if our_side not in {1, 2}:
+        if solver is None or our_side not in {1, 2}:
             return None
 
         our_status = "win1" if our_side == 1 else "win2"
@@ -1845,7 +1958,7 @@ def main() -> int:
                 ):
                     if not game_result_recorded and isinstance(last_sequence, str):
                         try:
-                            lobby_status = solver.status(last_sequence)
+                            lobby_status = solver.status(last_sequence) if solver is not None else None
                         except RuntimeError:
                             lobby_status = None
                         if lobby_status in {"win1", "win2", "draw"}:
@@ -2211,7 +2324,7 @@ def main() -> int:
                         if strong_terminal_ui:
                             if not game_result_recorded and isinstance(last_sequence, str):
                                 try:
-                                    fallback_status = solver.status(last_sequence)
+                                    fallback_status = solver.status(last_sequence) if solver is not None else None
                                 except RuntimeError:
                                     fallback_status = None
                                 if fallback_status in {"win1", "win2", "draw"}:
@@ -2409,7 +2522,7 @@ def main() -> int:
                     last_sequence = seq
 
                 try:
-                    seq_status = solver.status(seq)
+                    seq_status = solver.status(seq) if solver is not None else "ongoing"
                 except RuntimeError as exc:
                     print(f"[bridge] Solver status error: {exc}")
                     time.sleep(args.poll_ms / 1000.0)
@@ -2611,6 +2724,13 @@ def main() -> int:
                     )
 
                 if not is_our_turn(seq, detected_player):
+                    # Capture opponent positions for early-game dataset while waiting.
+                    if solver is not None and len(seq) <= args.collect_early_max_ply and seq not in early_csv_seen:
+                        try:
+                            opp_best = solver.best_move(seq)
+                            record_early(seq, opp_best)
+                        except RuntimeError:
+                            pass
                     time.sleep(args.poll_ms / 1000.0)
                     continue
 
@@ -2653,12 +2773,15 @@ def main() -> int:
                 else:
                     try:
                         solve_started_at = time.time()
-                        move_col_raw = solver.best_move(seq)
+                        move_col_raw = move_client.best_move(seq)
                         solve_elapsed = time.time() - solve_started_at
                     except RuntimeError as exc:
-                        print(f"[bridge] Solver error: {exc}")
+                        print(f"[bridge] Move client error: {exc}")
                         time.sleep(args.poll_ms / 1000.0)
                         continue
+
+                    if len(seq) <= args.collect_early_max_ply:
+                        record_early(seq, move_col_raw)
 
                     game_solve_total_sec += solve_elapsed
                     game_solve_samples += 1
@@ -2865,7 +2988,9 @@ def main() -> int:
         return 1
     finally:
         operator_console_stop.set()
-        solver.close()
+        move_client.close()
+        if early_csv_file is not None:
+            early_csv_file.close()
 
     return 0
 
